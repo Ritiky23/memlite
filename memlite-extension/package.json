@@ -6,7 +6,7 @@
   "publisher": "ritik",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/memlite.git"
+    "url": "https://github.com/Ritiky23/memlite.git"
   },
   "engines": {
     "vscode": "^1.80.0"
