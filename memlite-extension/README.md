@@ -4,6 +4,8 @@
 
 MemLite is a local-first, private visual dashboard that automatically indexes your conversations and code changes, visually organizes them into a **Collapsible Mind Map**, and lets you compile and inject past context into new conversations natively using a workspace reference file.
 
+![MemLite Visual Mind Map and Context Cart](media/dashboard.png)
+
 ---
 
 ## 🚀 Key Features

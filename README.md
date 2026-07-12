@@ -6,6 +6,8 @@ MemLite is a lightweight, local-first memory engine designed for LLM agents and 
 
 It now includes a **VS Code Extension** that automatically tracks development chats, displays them in a visual mind map, and syncs workspace context.
 
+![MemLite Visual Mind Map and Context Cart](memlite-extension/media/dashboard.png)
+
 ---
 
 ## 🚀 Core Engine Features

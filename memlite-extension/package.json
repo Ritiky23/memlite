@@ -2,7 +2,7 @@
     "name": "memlite-extension",
     "displayName": "MemLite — Local AI Memory Hub",
     "description": "Offline-first memory saver for your IDE chat. Captures questions/answers, creates a visual neural map, and passes context directly to your chat.",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "publisher": "memlite",
     "icon": "media/logo.png",
     "repository": {
