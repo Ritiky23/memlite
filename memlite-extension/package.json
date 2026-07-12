@@ -1,0 +1,90 @@
+{
+  "name": "memlite-extension",
+  "displayName": "MemLite — Local AI Memory Hub",
+  "description": "Offline-first memory saver for your IDE chat. Captures questions/answers, creates a visual neural map, and passes context directly to your chat.",
+  "version": "0.1.0",
+  "publisher": "ritik",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/memlite.git"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:memlite-graph-view"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "memlite-explorer",
+          "title": "MemLite",
+          "icon": "media/brain.svg"
+        }
+      ]
+    },
+    "views": {
+      "memlite-explorer": [
+        {
+          "id": "memlite-graph-view",
+          "type": "webview",
+          "name": "Visual Neural Graph"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "memlite.showGraph",
+        "title": "MemLite: Open Neural Map in Editor Tab"
+      },
+      {
+        "command": "memlite.exportDatabase",
+        "title": "MemLite: Export Memory Database"
+      },
+      {
+        "command": "memlite.importDatabase",
+        "title": "MemLite: Import Memory Database"
+      },
+      {
+        "command": "memlite.clearDatabase",
+        "title": "MemLite: Clear All Memories"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "memlite.exportDatabase",
+          "when": "view == memlite-graph-view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "memlite.importDatabase",
+          "when": "view == memlite-graph-view",
+          "group": "navigation@2"
+        },
+        {
+          "command": "memlite.clearDatabase",
+          "when": "view == memlite-graph-view",
+          "group": "navigation@3"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  }
+}

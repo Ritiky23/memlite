@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# VS Code / IDE Extension
+memlite-extension/node_modules/
+memlite-extension/out/
+memlite-extension/*.vsix
+.vscode/
+
+# Local Database & Watcher Logs
+.system_generated/
+*.log
+*.json
+!memlite-extension/package.json
+!memlite-extension/tsconfig.json
+
+# Workspace compiled context
+.memlite_context.md
+
+# Local test outputs and databases
+*.db
+output.txt

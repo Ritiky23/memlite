@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MemLite Visual Neural Map</title>
+    <link rel="stylesheet" href="${cssUri}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Floating Glass Header Controls -->
+        <header class="glass-panel main-header">
+            <div class="logo">
+                <span class="emoji">🧠</span>
+                <h1>MemLite <span class="tagline">Neural Map</span></h1>
+            </div>
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="Search memories..." autocomplete="off">
+                <button id="clear-search" class="icon-btn" title="Clear search">×</button>
+            </div>
+        </header>
+
+        <!-- Main Rendering Canvas Workspace -->
+        <div id="canvas-container">
+            <canvas id="graph-canvas"></canvas>
+            
+            <div class="instruction-overlay">
+                <p>🖱️ Left Click + Drag to pan | Scroll to zoom | Click node for options</p>
+            </div>
+        </div>
+
+        <!-- Sliding Node Detail Glass Panel -->
+        <div id="detail-panel" class="glass-panel sliding-panel hidden">
+            <div class="panel-header">
+                <span id="node-badge" class="badge">Q&A</span>
+                <span id="node-project" class="project-tag">Default Project</span>
+                <button id="close-panel" class="close-btn">&times;</button>
+            </div>
+            <div class="panel-body">
+                <div class="qa-section">
+                    <h3 class="label">Question</h3>
+                    <p id="detail-question" class="content"></p>
+                </div>
+                <div class="qa-section">
+                    <h3 class="label">Answer & Code Changes</h3>
+                    <p id="detail-answer" class="content"></p>
+                </div>
+                <div class="meta-section">
+                    <span id="detail-file" class="file-ref"></span>
+                </div>
+            </div>
+            <div class="panel-actions">
+                <button id="btn-pin" class="action-btn pin-btn">
+                    <span>📌 Pin to Cart</span>
+                </button>
+                <button id="btn-context" class="action-btn primary-btn">
+                    <span>⚡ Pass Context</span>
+                </button>
+                <button id="btn-delete" class="action-btn danger-btn">
+                    <span>🗑️ Delete Node</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Context Cart Drawer Overlay -->
+        <div id="cart-drawer" class="glass-panel cart-drawer collapsed">
+            <div class="cart-header">
+                <div class="cart-title">
+                    <span>🧠 Context Cart (<span id="cart-count">0</span> items)</span>
+                </div>
+                <button id="btn-toggle-cart" class="cart-toggle-btn">▲</button>
+            </div>
+            <div class="cart-body">
+                <ul id="cart-items-list" class="cart-list">
+                    <!-- Pinned items will be injected here dynamically -->
+                </ul>
+                <div class="cart-actions">
+                    <button id="btn-sync-workspace" class="action-btn sync-btn">
+                        <span>💾 Sync Workspace (.memlite_context.md)</span>
+                    </button>
+                    <button id="btn-copy-cart" class="action-btn copy-btn">
+                        <span>📋 Copy Context</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Interactive Tooltip -->
+    <div id="graph-tooltip" class="graph-tooltip hidden"></div>
+
+    <!-- Load custom visualizer script -->
+    <script src="${jsUri}"></script>
+</body>
+</html>

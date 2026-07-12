@@ -1,0 +1,258 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import { MemoryDatabase } from './database';
+import { TranscriptWatcher } from './watcher';
+import { MemoryGraphWebviewProvider } from './webview';
+
+let watcher: TranscriptWatcher | null = null;
+let activePanel: vscode.WebviewPanel | undefined = undefined;
+
+export function activate(context: vscode.ExtensionContext) {
+    console.log('MemLite: Extension is now active!');
+
+    // Initialize database in the global storage path (cross-workspace global memory)
+    const storagePath = context.globalStorageUri.fsPath;
+    const db = new MemoryDatabase(storagePath);
+
+    // Initialize and start log watcher
+    watcher = new TranscriptWatcher(db);
+    watcher.start();
+
+    // Register sidebar Webview View
+    const provider = new MemoryGraphWebviewProvider(context.extensionUri, db);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            MemoryGraphWebviewProvider.viewType,
+            provider
+        )
+    );
+
+    // Command to refresh the visualizer graph
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.refreshGraphView', () => {
+            provider.refresh();
+            if (activePanel) {
+                activePanel.webview.postMessage({
+                    type: 'updateGraph',
+                    data: db.getGraphData()
+                });
+            }
+        })
+    );
+
+    // Command to open the visual graph inside a large editor tab (Wow experience)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.showGraph', () => {
+            const panel = vscode.window.createWebviewPanel(
+                'memliteLargeGraph',
+                '🧠 MemLite Neural Map',
+                vscode.ViewColumn.One,
+                {
+                    enableScripts: true,
+                    localResourceRoots: [context.extensionUri]
+                }
+            );
+
+            activePanel = panel;
+            panel.onDidDispose(() => {
+                if (activePanel === panel) {
+                    activePanel = undefined;
+                }
+            });
+
+            // Re-use same HTML provider logic
+            const htmlPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'graph.html');
+            let htmlContent = fs.readFileSync(htmlPath.fsPath, 'utf8');
+            const cssUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media', 'graph.css'));
+            const jsUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media', 'graph.js'));
+            htmlContent = htmlContent.replace('${cssUri}', cssUri.toString());
+            htmlContent = htmlContent.replace('${jsUri}', jsUri.toString());
+            
+            panel.webview.html = htmlContent;
+
+            // Handle communication in the large webview tab
+            panel.webview.onDidReceiveMessage(async (message) => {
+                switch (message.type) {
+                    case 'ready':
+                        panel.webview.postMessage({
+                            type: 'updateGraph',
+                            data: db.getGraphData()
+                        });
+                        break;
+                    case 'deleteNode':
+                        const confirm = await vscode.window.showWarningMessage(
+                            "Are you sure you want to delete this memory node?",
+                            "Yes, Delete",
+                            "Cancel"
+                        );
+                        if (confirm === "Yes, Delete") {
+                            db.deleteRecord(message.nodeId);
+                            panel.webview.postMessage({
+                                type: 'updateGraph',
+                                data: db.getGraphData()
+                            });
+                            provider.refresh();
+                            vscode.window.showInformationMessage(`MemLite: Node deleted.`);
+                        }
+                        break;
+                    case 'passContext':
+                        // Leverage same logic (copies to clipboard, shows notification)
+                        const promptContext = compileContextBlock(message.text, message.answer, message.connected);
+                        await vscode.env.clipboard.writeText(promptContext);
+                        vscode.window.showInformationMessage("🧠 MemLite: Copied context to clipboard!");
+                        break;
+                    case 'copyClipboard':
+                        await vscode.env.clipboard.writeText(message.text);
+                        vscode.window.showInformationMessage("🧠 MemLite: Copied combined context to clipboard!");
+                        break;
+                    case 'exportContextFile':
+                        await vscode.commands.executeCommand('memlite.exportContextFile', message.items);
+                        break;
+                    case 'clearDatabase':
+                        await vscode.commands.executeCommand('memlite.clearDatabase');
+                        break;
+                }
+            });
+        })
+    );
+
+    // Command: Export Memory Database
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.exportDatabase', async () => {
+            const fileUri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(process.cwd(), 'memlite-backup.json')),
+                filters: { 'JSON Files': ['json'] },
+                title: 'Export MemLite Memory File'
+            });
+
+            if (fileUri) {
+                const success = db.exportDB(fileUri.fsPath);
+                if (success) {
+                    vscode.window.showInformationMessage(`MemLite: Memory exported to ${path.basename(fileUri.fsPath)}`);
+                } else {
+                    vscode.window.showErrorMessage('MemLite: Database export failed.');
+                }
+            }
+        })
+    );
+
+    // Command: Import Memory Database
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.importDatabase', async () => {
+            const fileUri = await vscode.window.showOpenDialog({
+                canSelectFiles: true,
+                canSelectFolders: false,
+                canSelectMany: false,
+                filters: { 'JSON Files': ['json'] },
+                title: 'Import MemLite Memory File'
+            });
+
+            if (fileUri && fileUri.length > 0) {
+                const success = db.importDB(fileUri[0].fsPath);
+                if (success) {
+                    provider.refresh();
+                    vscode.window.showInformationMessage('MemLite: Memory database restored successfully!');
+                } else {
+                    vscode.window.showErrorMessage('MemLite: Import failed. Please verify memory schema JSON.');
+                }
+            }
+        })
+    );
+
+    // Command: Clear Database
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.clearDatabase', async () => {
+            const choice = await vscode.window.showWarningMessage(
+                'CAUTION: Are you sure you want to permanently clear all MemLite memories?',
+                'Yes, delete everything',
+                'Cancel'
+            );
+
+            if (choice === 'Yes, delete everything') {
+                db.clearDB();
+                provider.refresh();
+                vscode.window.showInformationMessage('MemLite: All memories cleared.');
+            }
+        })
+    );
+
+    // Command: Export compiled context items to a workspace Markdown file (.memlite_context.md)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.exportContextFile', async (items: any[]) => {
+            await handleExportContextFile(items);
+        })
+    );
+}
+
+function compileContextBlock(text: string, answer: string, connected: { question: string; answer: string }[]): string {
+    let block = `--- MEMLITE CONTEXT ---\n`;
+    if (connected && connected.length > 0) {
+        block += `Related Past Conversations:\n`;
+        connected.forEach((c, idx) => {
+            block += `[${idx + 1}] Q: "${c.question}"\n    A: "${c.answer}"\n\n`;
+        });
+        block += `-----------------------\n`;
+    }
+    block += `Selected Reference Q&A:\n`;
+    block += `Question: "${text}"\nAnswer: "${answer}"\n`;
+    block += `-----------------------`;
+    return block;
+}
+
+async function handleExportContextFile(items: any[]) {
+    if (!items || items.length === 0) {
+        vscode.window.showWarningMessage("MemLite: Context cart is empty. Pin some nodes first!");
+        return;
+    }
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage("MemLite: No active workspace folder. Open a folder to write `.memlite_context.md`.");
+        return;
+    }
+    const rootPath = workspaceFolders[0].uri.fsPath;
+    const contextFilePath = path.join(rootPath, '.memlite_context.md');
+
+    // Compile beautiful markdown reference
+    let md = `# 🧠 MemLite: Compiled Chat Context Reference\n\n`;
+    md += `This file contains the context, code snippets, and Q&A steps you compiled from your previous conversations.\n`;
+    md += `**Reference this file in your current Copilot/Codex/Gemini prompt** (e.g. type \`#file:.memlite_context.md\` or drag this file in) to pass the entire context instantly.\n\n`;
+    md += `---\n\n`;
+
+    items.forEach((item, index) => {
+        const title = item.question.replace(/\n/g, ' ').substring(0, 50).trim();
+        md += `## 💬 Step ${index + 1}: ${title}${item.question.length > 50 ? '...' : ''}\n`;
+        md += `* **Question:** ${item.question}\n`;
+        md += `* **Answer & Code Changes:**\n\n${item.answer}\n\n`;
+        md += `---\n\n`;
+    });
+
+    try {
+        fs.writeFileSync(contextFilePath, md, 'utf8');
+
+        // Add to gitignore automatically to keep git logs clean
+        const gitignorePath = path.join(rootPath, '.gitignore');
+        if (fs.existsSync(gitignorePath)) {
+            let gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
+            if (!gitignoreContent.includes('.memlite_context.md')) {
+                const suffix = gitignoreContent.endsWith('\n') ? '' : '\n';
+                fs.appendFileSync(gitignorePath, `${suffix}.memlite_context.md\n`, 'utf8');
+            }
+        }
+
+        // Open the document side-by-side
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(contextFilePath));
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, false);
+        vscode.window.showInformationMessage("🧠 MemLite: Workspace `.memlite_context.md` successfully updated!");
+    } catch (e) {
+        vscode.window.showErrorMessage(`MemLite: Failed to write context file: ${e}`);
+    }
+}
+
+export function deactivate() {
+    if (watcher) {
+        watcher.stop();
+    }
+    console.log('MemLite: Extension is deactivated.');
+}
