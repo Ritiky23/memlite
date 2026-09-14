@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import pytest
 from memlite.models import MemoryItem
 from memlite.storage import SQLiteStorage
@@ -43,11 +43,12 @@ def test_sqlite_storage_crud(temp_db):
     assert all_m[0].id == item.id
     
     # 5. Update last accessed
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     storage.update_memory_access(item.id, now)
     updated = storage.get_memory(item.id)
     # Compare with a tiny delta since timestamps lose precision in conversion
     assert abs((updated.last_accessed - now).total_seconds()) < 1.0
+
     
     # 6. Update importance
     storage.update_memory_importance(item.id, 0.95)

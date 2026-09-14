@@ -1,49 +1,118 @@
 (function() {
     const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
 
-    // Canvas DOM elements
+    // DOM Elements - Navigation & Switchers
+    const tabGraph = document.getElementById('tab-graph');
+    const tabTimeline = document.getElementById('tab-timeline');
+    const tabBoard = document.getElementById('tab-board');
+    const viewGraph = document.getElementById('view-graph');
+    const viewTimeline = document.getElementById('view-timeline');
+    const viewBoard = document.getElementById('view-board');
+    const statMemoryCount = document.getElementById('stat-memory-count');
+    const pillCartCount = document.getElementById('pill-cart-count');
+    const filterPills = document.querySelectorAll('.filter-pill');
+
+    // DOM Elements - Search
+    const searchInput = document.getElementById('search-input');
+    const clearSearchBtn = document.getElementById('clear-search');
+
+    // DOM Elements - Canvas & Controls
     const canvas = document.getElementById('graph-canvas');
     const ctx = canvas.getContext('2d');
     const container = document.getElementById('canvas-container');
+    const btnZoomIn = document.getElementById('btn-zoom-in');
+    const btnZoomOut = document.getElementById('btn-zoom-out');
+    const btnFitScreen = document.getElementById('btn-fit-screen');
+    const btnResetView = document.getElementById('btn-reset-view');
 
-    // UI elements
-    const searchInput = document.getElementById('search-input');
-    const clearSearchBtn = document.getElementById('clear-search');
+    // DOM Elements - Timeline & Context Recovery Deck
+    const timelineStream = document.getElementById('timeline-stream');
+    const colCardsInvariants = document.getElementById('col-cards-invariants');
+    const colCardsFiles = document.getElementById('col-cards-files');
+    const colCardsSessions = document.getElementById('col-cards-sessions');
+    const colCardsCart = document.getElementById('col-cards-cart');
+    const countInvariants = document.getElementById('count-invariants');
+    const countFiles = document.getElementById('count-files');
+    const countSessions = document.getElementById('count-sessions');
+    const countCart = document.getElementById('count-cart');
+    const btnAddInvariantCol = document.getElementById('btn-add-invariant-col');
+    const btnRehydrateCol = document.getElementById('btn-rehydrate-col');
+    const btnRehydrateHeader = document.getElementById('btn-rehydrate-header');
+
+    // DOM Elements - Sliding Detail Drawer
     const detailPanel = document.getElementById('detail-panel');
     const closePanelBtn = document.getElementById('close-panel');
     const detailQuestion = document.getElementById('detail-question');
     const detailAnswer = document.getElementById('detail-answer');
     const detailFile = document.getElementById('detail-file');
+    const detailFileSection = document.getElementById('detail-file-section');
     const nodeBadge = document.getElementById('node-badge');
     const nodeProject = document.getElementById('node-project');
+    const btnPin = document.getElementById('btn-pin');
     const btnContext = document.getElementById('btn-context');
     const btnDelete = document.getElementById('btn-delete');
-    
-    // Pinned Cart elements
-    const btnPin = document.getElementById('btn-pin');
+
+    // DOM Elements - Context Cart Drawer
     const cartDrawer = document.getElementById('cart-drawer');
     const cartCount = document.getElementById('cart-count');
     const cartItemsList = document.getElementById('cart-items-list');
     const btnToggleCart = document.getElementById('btn-toggle-cart');
+    const btnToggleCartDrawer = document.getElementById('btn-toggle-cart-drawer');
     const btnSyncWorkspace = document.getElementById('btn-sync-workspace');
     const btnCopyCart = document.getElementById('btn-copy-cart');
+    const btnPruneHeader = document.getElementById('btn-prune-header');
     const tooltip = document.getElementById('graph-tooltip');
 
+    // DOM Elements - Add Invariant Modal
+    const modalAddInvariant = document.getElementById('modal-add-invariant');
+    const btnCloseModalInvariant = document.getElementById('btn-close-modal-invariant');
+    const btnCancelModalInvariant = document.getElementById('btn-cancel-modal-invariant');
+    const btnSaveInvariant = document.getElementById('btn-save-invariant');
+    const inputInvariantContent = document.getElementById('input-invariant-content');
+    const selectInvariantType = document.getElementById('select-invariant-type');
+    const inputInvariantScope = document.getElementById('input-invariant-scope');
+
     // State Variables
+    let currentView = 'board'; // 'graph' | 'timeline' | 'board'
+    let activeCategoryFilter = 'ALL';
     let rawNodes = [];
     let rawLinks = [];
+    let rawInvariants = [];
+    let rawFileActions = [];
     let visibleNodes = [];
     let visibleLinks = [];
-    let transform = { x: 40, y: 80, k: 0.95 }; // Coordinates offset
+    let transform = { x: 50, y: 60, k: 0.95 };
     let hoverNode = null;
     let selectedNode = null;
     let searchHighlightIds = new Set();
-    let collapsedConversationIds = new Set(); // Stores collapsed conversation IDs
-    let pinnedNodeIds = new Set(); // Stores pinned node IDs inside Context Cart
+    let collapsedConversationIds = new Set();
+    let pinnedNodeIds = new Set();
     let isPanning = false;
     let panStart = { x: 0, y: 0 };
+    let sessionDeckLimit = 15;
+    let fileDeckLimit = 30;
+    let timelineSessionLimit = 5;
 
-    // High DPI Canvas Configuration (Sharp Text and Lines)
+    // Visual configurations
+    const NODE_COLORS = {
+        Decision: '#00f0ff',
+        Code: '#10b981',
+        Session: '#3b82f6',
+        Discussion: '#94a3b8',
+        Invariants: '#f59e0b',
+        General: '#94a3b8'
+    };
+
+    const CARD_CONFIG = {
+        qaWidth: 155,
+        qaHeight: 52,
+        hubWidth: 130,
+        hubHeight: 48,
+        stepGapX: 35,
+        laneGapY: 85
+    };
+
+    // Canvas Resize Handler
     function resizeCanvas() {
         const dpr = window.devicePixelRatio || 1;
         const rect = container.getBoundingClientRect();
@@ -55,18 +124,34 @@
     }
     window.addEventListener('resize', resizeCanvas);
 
-    // Visual configurations
-    const NODE_STYLES = {
-        Preference: { color: '#00f0ff', radius: 9, glow: 'rgba(0, 240, 255, 0.45)' },
-        Personal: { color: '#d600ff', radius: 9, glow: 'rgba(214, 0, 255, 0.45)' },
-        Skill: { color: '#ffb300', radius: 9, glow: 'rgba(255, 179, 0, 0.45)' },
-        General: { color: '#8e9fae', radius: 9, glow: 'rgba(142, 159, 174, 0.45)' },
-        Project: { color: '#00ff66', radius: 13, glow: 'rgba(0, 255, 102, 0.45)' }
-    };
+    // Filter Node Matcher
+    function isNodeMatchingFilters(node) {
+        // Category Filter
+        if (activeCategoryFilter === 'PINNED') {
+            if (!pinnedNodeIds.has(node.id)) return false;
+        } else if (activeCategoryFilter !== 'ALL') {
+            if (node.type === 'qa' && node.category !== activeCategoryFilter) return false;
+        }
 
-    // Calculate static, organized Mind Map Tree Layout positions (No physics simulation needed)
+        // Search Filter
+        const query = searchInput.value.toLowerCase().trim();
+        if (query.length >= 2) {
+            const tokens = query.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
+            const labelText = (node.label || '').toLowerCase();
+            const fullTitle = (node.fullTitle || '').toLowerCase();
+            const questionText = (node.details && node.details.question) ? node.details.question.toLowerCase() : '';
+            const answerText = (node.details && node.details.answer) ? node.details.answer.toLowerCase() : '';
+            const tagsText = (node.details && node.details.tags) ? node.details.tags.join(' ').toLowerCase() : '';
+
+            const combined = `${labelText} ${fullTitle} ${questionText} ${answerText} ${tagsText}`;
+            return combined.includes(query) || (tokens.length > 0 && tokens.some(t => combined.includes(t)));
+        }
+
+        return true;
+    }
+
+    // Card-Based Mind Map Layout (Compact Wrapping Tree)
     function calculateTreeLayout() {
-        // Group nodes by conversationId
         const conversations = {};
         const chatSessionNodes = {};
         
@@ -85,150 +170,278 @@
 
         const activeSessions = Object.keys(chatSessionNodes);
         
-        // Configuration metrics for spacing
-        const stepWidth = 180;  // Spaced out horizontally
-        const laneHeight = 130; // Spaced out vertically
-        const startX = 60;
-        const startY = 60;
+        // Performance guard: collapse older sessions by default if more than 5 exist
+        if (collapsedConversationIds.size === 0 && activeSessions.length > 5) {
+            activeSessions.slice(0, activeSessions.length - 5).forEach(cId => {
+                collapsedConversationIds.add(cId);
+            });
+        }
+
+        const startX = 40;
+        let currentY = 50;
 
         visibleNodes = [];
         visibleLinks = [];
 
-        activeSessions.forEach((cId, laneIndex) => {
+        activeSessions.forEach((cId) => {
             const sessionNode = chatSessionNodes[cId];
             const children = conversations[cId] || [];
             
-            // Layout session node
+            // Session Hub position
             sessionNode.x = startX;
-            sessionNode.y = startY + laneIndex * laneHeight;
+            sessionNode.y = currentY;
+            sessionNode.w = CARD_CONFIG.hubWidth;
+            sessionNode.h = CARD_CONFIG.hubHeight;
             visibleNodes.push(sessionNode);
 
             const isCollapsed = collapsedConversationIds.has(cId);
             if (!isCollapsed) {
-                // Sort children chronologically (Step Index)
                 children.sort((a, b) => (a.details.stepIndex ?? 0) - (b.details.stepIndex ?? 0));
 
-                children.forEach((qaNode, stepIndex) => {
-                    qaNode.x = startX + (stepIndex + 1) * stepWidth;
-                    qaNode.y = sessionNode.y;
+                const maxCols = 4; // Max 4 steps per row, then wraps
+                let laneRows = 1;
+
+                children.forEach((qaNode, idx) => {
+                    const colIndex = idx % maxCols;
+                    const rowIndex = Math.floor(idx / maxCols);
+                    laneRows = Math.max(laneRows, rowIndex + 1);
+
+                    qaNode.w = CARD_CONFIG.qaWidth;
+                    qaNode.h = CARD_CONFIG.qaHeight;
+                    qaNode.x = startX + CARD_CONFIG.hubWidth + CARD_CONFIG.stepGapX + colIndex * (CARD_CONFIG.qaWidth + CARD_CONFIG.stepGapX);
+                    qaNode.y = currentY + rowIndex * (CARD_CONFIG.qaHeight + 25);
                     visibleNodes.push(qaNode);
 
-                    // Connect links between QAs
-                    const prevNode = stepIndex === 0 ? sessionNode : children[stepIndex - 1];
+                    // Connect link from previous step
+                    const prevNode = idx === 0 ? sessionNode : children[idx - 1];
                     visibleLinks.push({
                         source: prevNode.id,
                         target: qaNode.id,
-                        sourceX: prevNode.x,
-                        sourceY: prevNode.y,
+                        sourceX: prevNode.x + (prevNode.w || CARD_CONFIG.qaWidth),
+                        sourceY: prevNode.y + (prevNode.h || CARD_CONFIG.qaHeight) / 2,
                         targetX: qaNode.x,
-                        targetY: qaNode.y
+                        targetY: qaNode.y + qaNode.h / 2
                     });
+                });
+
+                currentY += (laneRows * (CARD_CONFIG.qaHeight + 25)) + 40;
+            } else {
+                currentY += CARD_CONFIG.hubHeight + CARD_CONFIG.laneGapY;
+            }
+        });
+
+        // Include explicit cognitive relationships
+        (rawLinks || []).forEach(l => {
+            if (['session_member', 'next_question'].includes(l.type)) return;
+            const src = visibleNodes.find(n => n.id === l.source);
+            const tgt = visibleNodes.find(n => n.id === l.target);
+            if (src && tgt) {
+                visibleLinks.push({
+                    source: src.id,
+                    target: tgt.id,
+                    type: l.type || 'SIMILAR',
+                    sourceX: src.x + src.w / 2,
+                    sourceY: src.y + src.h,
+                    targetX: tgt.x + tgt.w / 2,
+                    targetY: tgt.y
                 });
             }
         });
 
-        draw();
+        if (currentView === 'graph') {
+            draw();
+        }
     }
 
-    // Main Draw Routine
+    // Canvas Draw Routine
     function draw() {
         const rect = canvas.getBoundingClientRect();
         ctx.clearRect(0, 0, rect.width, rect.height);
 
         ctx.save();
-        // Apply coordinate system translations
         ctx.translate(transform.x, transform.y);
         ctx.scale(transform.k, transform.k);
 
-        // 1. Draw elegant connection links (Bezier curves)
+        const hasActiveSearch = searchInput.value.trim().length >= 2;
+
+        // 1. Draw Links
         visibleLinks.forEach(link => {
-            ctx.beginPath();
-            ctx.moveTo(link.sourceX, link.sourceY);
-            
-            // Draw a smooth curved cubic Bezier connection
-            const midX = (link.sourceX + link.targetX) / 2;
-            ctx.bezierCurveTo(midX, link.sourceY, midX, link.targetY, link.targetX, link.targetY);
-            
-            const sourceNode = visibleNodes.find(n => n.id === link.source);
-            const targetNode = visibleNodes.find(n => n.id === link.target);
-            
-            const isFaded = selectedNode && 
-                            selectedNode.id !== link.source && 
-                            selectedNode.id !== link.target;
-            
-            ctx.globalAlpha = isFaded ? 0.15 : 0.7;
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-            ctx.lineWidth = 2.2;
-            ctx.stroke();
-        });
+            const srcNode = visibleNodes.find(n => n.id === link.source);
+            const tgtNode = visibleNodes.find(n => n.id === link.target);
+            if (!srcNode || !tgtNode) return;
 
-        ctx.globalAlpha = 1.0;
-
-        // 2. Draw Nodes
-        visibleNodes.forEach(node => {
-            const style = NODE_STYLES[node.category] || NODE_STYLES['General'];
-            
-            const isSearchResult = searchHighlightIds.has(node.id);
-            const isSelected = selectedNode && selectedNode.id === node.id;
-            const isFaded = selectedNode && selectedNode.id !== node.id && 
-                            !visibleLinks.some(l => (l.source === selectedNode.id && l.target === node.id) || (l.target === selectedNode.id && l.source === node.id));
+            const isSrcMatch = isNodeMatchingFilters(srcNode);
+            const isTgtMatch = isNodeMatchingFilters(tgtNode);
+            const isMatch = isSrcMatch && isTgtMatch;
+            const isCognitive = link.type && !['session_member', 'next_question'].includes(link.type);
 
             ctx.save();
-            ctx.globalAlpha = isFaded ? (isSearchResult ? 0.8 : 0.25) : 1.0;
-
-            // Highlight ring on hover or selection
-            if (isSearchResult || isSelected || hoverNode === node) {
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, style.radius + (isSearchResult ? 6 : 4), 0, Math.PI * 2);
-                ctx.fillStyle = style.glow;
-                ctx.fill();
-            }
-
-            // Pinned Cart Magenta double ring
-            if (pinnedNodeIds.has(node.id)) {
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, style.radius + 5, 0, Math.PI * 2);
-                ctx.strokeStyle = '#d600ff';
-                ctx.lineWidth = 1.6;
-                ctx.stroke();
-            }
-
-            // Center Circle Node
             ctx.beginPath();
-            ctx.arc(node.x, node.y, style.radius, 0, Math.PI * 2);
-            ctx.fillStyle = style.color;
+            ctx.moveTo(link.sourceX, link.sourceY);
+
+            const midX = (link.sourceX + link.targetX) / 2;
+            ctx.bezierCurveTo(midX, link.sourceY, midX, link.targetY, link.targetX, link.targetY);
+
+            if (isCognitive) {
+                ctx.setLineDash([4, 3]);
+                if (link.type === 'CAUSAL') ctx.strokeStyle = 'rgba(214, 0, 255, 0.7)';
+                else if (link.type === 'ENTITY') ctx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+                else if (link.type === 'SUPERSEDES') ctx.strokeStyle = 'rgba(255, 179, 0, 0.7)';
+                else if (link.type === 'CO_RECALLED') ctx.strokeStyle = 'rgba(0, 255, 102, 0.7)';
+                else ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
+                ctx.lineWidth = 1.6;
+            } else {
+                ctx.strokeStyle = isMatch ? 'rgba(0, 240, 255, 0.4)' : 'rgba(255, 255, 255, 0.08)';
+                ctx.lineWidth = isMatch ? 2.0 : 1.4;
+            }
+
+            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.08 : 0.8;
+            ctx.stroke();
+
+            // Draw badge for cognitive relations
+            if (isCognitive) {
+                const midT_X = midX;
+                const midT_Y = (link.sourceY + link.targetY) / 2;
+                ctx.setLineDash([]);
+                ctx.fillStyle = '#0f172a';
+                ctx.beginPath();
+                ctx.roundRect(midT_X - 28, midT_Y - 8, 56, 16, 4);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+                ctx.lineWidth = 0.8;
+                ctx.stroke();
+
+                ctx.fillStyle = '#e2e8f0';
+                ctx.font = 'bold 8px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(link.type.toUpperCase(), midT_X, midT_Y);
+            }
+
+            ctx.restore();
+        });
+
+        // 2. Draw Cards
+        visibleNodes.forEach(node => {
+            const isMatch = isNodeMatchingFilters(node);
+            const isSelected = selectedNode && selectedNode.id === node.id;
+            const isHovered = hoverNode === node;
+            const isPinned = pinnedNodeIds.has(node.id);
+
+            ctx.save();
+            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.12 : (isMatch ? 1.0 : 0.35);
+
+            const x = node.x;
+            const y = node.y;
+            const w = node.w;
+            const h = node.h;
+            const radius = 6;
+            const catColor = NODE_COLORS[node.category] || NODE_COLORS['General'];
+
+            // Card Glow on Hover or Match
+            if (isMatch && hasActiveSearch) {
+                ctx.shadowColor = 'rgba(0, 240, 255, 0.4)';
+                ctx.shadowBlur = 12;
+            } else if (isSelected || isHovered) {
+                ctx.shadowColor = 'rgba(0, 240, 255, 0.25)';
+                ctx.shadowBlur = 8;
+            }
+
+            // Card Background Glass Fill
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, radius);
+            ctx.fillStyle = isSelected ? 'rgba(30, 41, 59, 0.95)' : (isHovered ? 'rgba(20, 30, 48, 0.9)' : 'rgba(15, 23, 42, 0.82)');
             ctx.fill();
 
-            // Label text drawing
-            ctx.fillStyle = isSelected ? '#ffffff' : '#94a3b8';
-            ctx.font = isSelected ? 'bold 11px sans-serif' : '10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'top';
+            // Card Border
+            ctx.strokeStyle = isSelected ? '#00f0ff' : (isPinned ? '#d600ff' : (isHovered ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.07)'));
+            ctx.lineWidth = isSelected || isPinned ? 1.6 : 1;
+            ctx.stroke();
 
-            // Clean Node Labels to avoid text clutter/overlap
-            ctx.fillText(node.label, node.x, node.y + style.radius + 7);
+            // Reset Shadow
+            ctx.shadowBlur = 0;
 
-            // Collapse indicator (+) for collapsed chat session nodes
             if (node.type === 'chat_session') {
-                const cId = node.id.replace('chat_', '');
-                const isCollapsed = collapsedConversationIds.has(cId);
-                
-                ctx.fillStyle = '#1e293b';
+                // Left category indicator bar
+                ctx.fillStyle = '#00ff66';
                 ctx.beginPath();
-                ctx.arc(node.x + 9, node.y - 9, 6, 0, Math.PI * 2);
+                ctx.roundRect(x + 2, y + 2, 4, h - 4, [radius, 0, 0, radius]);
                 ctx.fill();
 
+                // Chat session title
+                ctx.fillStyle = '#f1f5f9';
+                ctx.font = 'bold 11px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText(node.label, x + 14, y + 10);
+
+                ctx.fillStyle = '#64748b';
+                ctx.font = '10px sans-serif';
+                const subtitle = (node.fullTitle || 'Chat Session').replace(/^💬\s*"/, '').replace(/"$/, '');
+                const truncatedSub = subtitle.length > 14 ? subtitle.substring(0, 13) + '...' : subtitle;
+                ctx.fillText(truncatedSub, x + 14, y + 26);
+
+                // Collapse +/- bubble
+                const cId = node.id.replace('chat_', '');
+                const isCollapsed = collapsedConversationIds.has(cId);
+                ctx.fillStyle = '#1e293b';
+                ctx.beginPath();
+                ctx.arc(x + w - 12, y + 14, 7, 0, Math.PI * 2);
+                ctx.fill();
                 ctx.strokeStyle = '#00ff66';
                 ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.arc(node.x + 9, node.y - 9, 6, 0, Math.PI * 2);
                 ctx.stroke();
 
                 ctx.fillStyle = '#00ff66';
-                ctx.font = 'bold 8px monospace';
+                ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(isCollapsed ? '+' : '-', node.x + 9, node.y - 9);
+                ctx.fillText(isCollapsed ? '+' : '−', x + w - 12, y + 14);
+
+            } else {
+                // Q&A Node Card
+                // Left category indicator bar
+                ctx.fillStyle = catColor;
+                ctx.beginPath();
+                ctx.roundRect(x + 2, y + 2, 3, h - 4, [radius, 0, 0, radius]);
+                ctx.fill();
+
+                // Step & Category Pill Header
+                ctx.fillStyle = '#64748b';
+                ctx.font = 'bold 9px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText(node.label, x + 10, y + 8);
+
+                ctx.fillStyle = catColor;
+                ctx.textAlign = 'right';
+                ctx.font = '8px sans-serif';
+                ctx.fillText(node.category.toUpperCase(), x + w - 8, y + 8);
+
+                // Question Title (truncated)
+                ctx.fillStyle = isSelected ? '#ffffff' : '#e2e8f0';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'left';
+                const qText = (node.details && node.details.question) ? node.details.question : 'Q&A Step';
+                const cleanQ = qText.replace(/\n/g, ' ').trim();
+                const truncatedQ = cleanQ.length > 21 ? cleanQ.substring(0, 19) + '...' : cleanQ;
+                ctx.fillText(truncatedQ, x + 10, y + 22);
+
+                // Tags Preview Footer
+                if (node.details && node.details.tags && node.details.tags.length > 0) {
+                    ctx.fillStyle = '#64748b';
+                    ctx.font = '8px sans-serif';
+                    const tagStr = '#' + node.details.tags.slice(0, 2).join(' #');
+                    ctx.fillText(tagStr, x + 10, y + 36);
+                }
+
+                // Pinned Cart Indicator
+                if (isPinned) {
+                    ctx.fillStyle = '#d600ff';
+                    ctx.beginPath();
+                    ctx.arc(x + w - 8, y + h - 8, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
             }
 
             ctx.restore();
@@ -237,46 +450,33 @@
         ctx.restore();
     }
 
-    // Translate coordinates mapping
+    // Coordinates mapping
     function getTransformedCoords(e) {
         const rect = canvas.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
         return {
-            x: (mouseX - transform.x) / transform.k,
-            y: (mouseY - transform.y) / transform.k
+            x: (e.clientX - rect.left - transform.x) / transform.k,
+            y: (e.clientY - rect.top - transform.y) / transform.k
         };
     }
 
-    // Drag, Pan and Selection Handlers
+    // Canvas Mouse & Interaction Handlers
     canvas.addEventListener('mousedown', e => {
         const coords = getTransformedCoords(e);
         
-        // Find clicked node
         const clickedNode = visibleNodes.find(node => {
-            const style = NODE_STYLES[node.category] || { radius: 8 };
-            const dx = node.x - coords.x;
-            const dy = node.y - coords.y;
-            return dx * dx + dy * dy < (style.radius + 6) * (style.radius + 6);
+            return coords.x >= node.x && coords.x <= node.x + node.w &&
+                   coords.y >= node.y && coords.y <= node.y + node.h;
         });
 
         if (clickedNode) {
             if (clickedNode.type === 'chat_session') {
-                // Check if user clicked the collapse plus/minus bubble coordinate bounds
-                const dx = coords.x - (clickedNode.x + 9);
-                const dy = coords.y - (clickedNode.y - 9);
-                const clickToggle = (dx * dx + dy * dy <= 80);
-
-                if (clickToggle) {
-                    const convId = clickedNode.id.replace('chat_', '');
-                    if (collapsedConversationIds.has(convId)) {
-                        collapsedConversationIds.delete(convId);
-                    } else {
-                        collapsedConversationIds.add(convId);
-                    }
-                    calculateTreeLayout();
-                    return;
+                const convId = clickedNode.id.replace('chat_', '');
+                if (collapsedConversationIds.has(convId)) {
+                    collapsedConversationIds.delete(convId);
+                } else {
+                    collapsedConversationIds.add(convId);
                 }
+                calculateTreeLayout();
             }
             selectNode(clickedNode);
         } else {
@@ -296,13 +496,10 @@
             return;
         }
 
-        // Manage hover cursor state
         const prevHover = hoverNode;
         hoverNode = visibleNodes.find(node => {
-            const style = NODE_STYLES[node.category] || { radius: 8 };
-            const dx = node.x - coords.x;
-            const dy = node.y - coords.y;
-            return dx * dx + dy * dy < (style.radius + 6) * (style.radius + 6);
+            return coords.x >= node.x && coords.x <= node.x + node.w &&
+                   coords.y >= node.y && coords.y <= node.y + node.h;
         });
         
         if (prevHover !== hoverNode) {
@@ -310,18 +507,16 @@
             draw();
         }
 
-        // Tooltip display logic
         if (hoverNode) {
             if (hoverNode.type === 'chat_session') {
-                const text = hoverNode.fullTitle || hoverNode.label;
-                tooltip.innerHTML = `<strong>Chat Session Hub</strong><br/>${text.replace(/^💬\s*"/, '').replace(/"$/, '')}`;
+                tooltip.innerHTML = `<strong>Chat Session</strong><br/>${hoverNode.fullTitle || hoverNode.label}`;
             } else {
                 const titleText = hoverNode.details && hoverNode.details.question ? hoverNode.details.question : 'Q&A Step';
                 const cleanText = titleText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                tooltip.innerHTML = `<strong>${hoverNode.label}</strong><br/>${cleanText}`;
+                tooltip.innerHTML = `<strong>${hoverNode.label} [${hoverNode.category}]</strong><br/>${cleanText}`;
             }
-            tooltip.style.left = `${e.clientX + 15}px`;
-            tooltip.style.top = `${e.clientY + 15}px`;
+            tooltip.style.left = `${e.clientX + 14}px`;
+            tooltip.style.top = `${e.clientY + 14}px`;
             tooltip.classList.remove('hidden');
             tooltip.classList.add('visible');
         } else {
@@ -330,27 +525,66 @@
         }
     });
 
-    window.addEventListener('mouseup', () => {
-        isPanning = false;
-    });
+    window.addEventListener('mouseup', () => { isPanning = false; });
 
     canvas.addEventListener('wheel', e => {
         e.preventDefault();
-        const zoomIntensity = 0.08;
+        const zoomFactor = Math.exp((e.deltaY < 0 ? 1 : -1) * 0.08);
         const rect = canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
 
-        const wheel = e.deltaY < 0 ? 1 : -1;
-        const zoomFactor = Math.exp(wheel * zoomIntensity);
-
         transform.x = mouseX - (mouseX - transform.x) * zoomFactor;
         transform.y = mouseY - (mouseY - transform.y) * zoomFactor;
         transform.k *= zoomFactor;
-        transform.k = Math.max(0.2, Math.min(transform.k, 4));
+        transform.k = Math.max(0.3, Math.min(transform.k, 3));
         draw();
     });
 
+    // Zoom Helpers
+    btnZoomIn.addEventListener('click', () => {
+        transform.k = Math.min(transform.k * 1.25, 3);
+        draw();
+    });
+
+    btnZoomOut.addEventListener('click', () => {
+        transform.k = Math.max(transform.k / 1.25, 0.3);
+        draw();
+    });
+
+    btnResetView.addEventListener('click', () => {
+        transform = { x: 50, y: 60, k: 0.95 };
+        draw();
+    });
+
+    btnFitScreen.addEventListener('click', fitToScreen);
+
+    function fitToScreen() {
+        if (visibleNodes.length === 0) return;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        visibleNodes.forEach(n => {
+            minX = Math.min(minX, n.x);
+            minY = Math.min(minY, n.y);
+            maxX = Math.max(maxX, n.x + n.w);
+            maxY = Math.max(maxY, n.y + n.h);
+        });
+
+        const rect = canvas.getBoundingClientRect();
+        const padding = 60;
+        const contentW = maxX - minX;
+        const contentH = maxY - minY;
+
+        if (contentW > 0 && contentH > 0) {
+            const scaleX = (rect.width - padding * 2) / contentW;
+            const scaleY = (rect.height - padding * 2) / contentH;
+            transform.k = Math.max(0.35, Math.min(Math.min(scaleX, scaleY), 1.2));
+            transform.x = (rect.width - contentW * transform.k) / 2 - minX * transform.k;
+            transform.y = (rect.height - contentH * transform.k) / 2 - minY * transform.k;
+            draw();
+        }
+    }
+
+    // Node Selection & Detail Drawer Logic
     function selectNode(node) {
         selectedNode = node;
         draw();
@@ -359,25 +593,25 @@
             detailQuestion.innerText = node.details.question;
             detailAnswer.innerText = node.details.answer;
             nodeBadge.className = 'badge qa';
-            nodeBadge.innerText = 'Q&A';
+            nodeBadge.innerText = node.category || 'Q&A';
             nodeProject.innerText = node.details.project || 'memlite';
             detailFile.innerText = node.details.fileRef ? `References: ${node.details.fileRef}` : '';
             
-            // Context Cart button state toggle
+            const pinLabel = btnPin.querySelector('.btn-label');
             if (pinnedNodeIds.has(node.id)) {
                 btnPin.classList.add('pinned');
-                btnPin.querySelector('span').innerText = '📌 Pinned';
+                if (pinLabel) pinLabel.innerText = 'Pinned';
             } else {
                 btnPin.classList.remove('pinned');
-                btnPin.querySelector('span').innerText = '📌 Pin to Cart';
+                if (pinLabel) pinLabel.innerText = 'Pin to Cart';
             }
-            btnPin.style.display = 'block';
-            btnContext.style.display = 'block';
-            btnDelete.style.display = 'block';
+            btnPin.style.display = 'inline-flex';
+            btnContext.style.display = 'inline-flex';
+            btnDelete.style.display = 'inline-flex';
             detailPanel.classList.remove('hidden');
         } else if (node.type === 'chat_session') {
             detailQuestion.innerText = node.fullTitle || node.label;
-            detailAnswer.innerText = "This node represents a conversation session. Click its plus/minus bubble directly to expand or collapse its sequential questions.";
+            detailAnswer.innerText = "This node represents a conversation session. Click to toggle its steps in the mind map.";
             nodeBadge.className = 'badge project';
             nodeBadge.innerText = 'Chat Session';
             nodeProject.innerText = 'Workspace';
@@ -397,15 +631,16 @@
         detailPanel.classList.add('hidden');
         draw();
     }
-
     closePanelBtn.addEventListener('click', hidePanel);
 
     // Context Cart Actions
     function updateCartUI() {
-        cartCount.innerText = pinnedNodeIds.size;
+        const count = pinnedNodeIds.size;
+        cartCount.innerText = count;
+        pillCartCount.innerText = count;
         cartItemsList.innerHTML = '';
 
-        if (pinnedNodeIds.size === 0) {
+        if (count === 0) {
             cartItemsList.innerHTML = '<li class="cart-item" style="color: #64748b; font-style: italic; border: none; background: transparent; justify-content: center;">No items in cart</li>';
             return;
         }
@@ -419,7 +654,8 @@
 
             const span = document.createElement('span');
             span.className = 'cart-item-text';
-            span.innerText = node.label;
+            const qTitle = (node.details && node.details.question) ? node.details.question : node.label;
+            span.innerText = qTitle;
             li.appendChild(span);
 
             const removeBtn = document.createElement('button');
@@ -430,104 +666,75 @@
                 pinnedNodeIds.delete(id);
                 updateCartUI();
                 draw();
-                if (selectedNode && selectedNode.id === id) {
-                    selectNode(selectedNode);
-                }
+                renderTimeline();
+                renderBoard();
+                if (selectedNode && selectedNode.id === id) selectNode(selectedNode);
             });
             li.appendChild(removeBtn);
-
             cartItemsList.appendChild(li);
         });
     }
 
     btnPin.addEventListener('click', () => {
         if (!selectedNode || selectedNode.type !== 'qa') return;
-
+        const pinLabel = btnPin.querySelector('.btn-label');
         if (pinnedNodeIds.has(selectedNode.id)) {
             pinnedNodeIds.delete(selectedNode.id);
             btnPin.classList.remove('pinned');
-            btnPin.querySelector('span').innerText = '📌 Pin to Cart';
+            if (pinLabel) pinLabel.innerText = 'Pin to Cart';
         } else {
             pinnedNodeIds.add(selectedNode.id);
             btnPin.classList.add('pinned');
-            btnPin.querySelector('span').innerText = '📌 Pinned';
-            
-            // Expand cart drawer
+            if (pinLabel) pinLabel.innerText = 'Pinned';
             cartDrawer.classList.remove('collapsed');
-            btnToggleCart.innerText = '▼';
         }
-        
         updateCartUI();
         draw();
+        renderTimeline();
+        renderBoard();
     });
 
-    function toggleCartDrawer() {
-        const collapsed = cartDrawer.classList.toggle('collapsed');
-        btnToggleCart.innerText = collapsed ? '▲' : '▼';
-    }
-
-    btnToggleCart.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleCartDrawer();
+    btnToggleCart.addEventListener('click', () => {
+        cartDrawer.classList.toggle('collapsed');
     });
 
-    document.querySelector('.cart-header').addEventListener('click', toggleCartDrawer);
+    btnToggleCartDrawer.addEventListener('click', () => {
+        cartDrawer.classList.toggle('collapsed');
+    });
 
     btnSyncWorkspace.addEventListener('click', () => {
         if (pinnedNodeIds.size === 0) return;
-
         const items = Array.from(pinnedNodeIds).map(id => {
             const node = rawNodes.find(n => n.id === id);
-            return {
-                question: node.details.question,
-                answer: node.details.answer
-            };
+            return { question: node.details.question, answer: node.details.answer };
         });
-
         if (vscode) {
-            vscode.postMessage({
-                type: 'exportContextFile',
-                items: items
-            });
+            vscode.postMessage({ type: 'exportContextFile', items: items });
         }
     });
 
     btnCopyCart.addEventListener('click', () => {
         if (pinnedNodeIds.size === 0) return;
-
         let compiledMarkdown = `# 🧠 Compiled Chat Context\n\n`;
         Array.from(pinnedNodeIds).forEach((id, index) => {
             const node = rawNodes.find(n => n.id === id);
             if (!node) return;
-            compiledMarkdown += `## [Step ${index + 1}] Question: ${node.details.question}\n`;
-            compiledMarkdown += `Answer:\n${node.details.answer}\n\n`;
-            compiledMarkdown += `---\n\n`;
+            compiledMarkdown += `## [Step ${index + 1}] ${node.details.question}\n${node.details.answer}\n\n---\n\n`;
         });
-
         if (vscode) {
-            vscode.postMessage({
-                type: 'copyClipboard',
-                text: compiledMarkdown
-            });
+            vscode.postMessage({ type: 'copyClipboard', text: compiledMarkdown });
         }
     });
 
     btnContext.addEventListener('click', () => {
         if (!selectedNode || selectedNode.type !== 'qa') return;
-
-        // Gather all other Q&As in the same conversation thread
         const connectedQAs = [];
         const cId = selectedNode.details.conversationId;
-        
         rawNodes.forEach(node => {
             if (node.type === 'qa' && node.id !== selectedNode.id && node.details && node.details.conversationId === cId) {
-                connectedQAs.push({
-                    question: node.details.question,
-                    answer: node.details.answer
-                });
+                connectedQAs.push({ question: node.details.question, answer: node.details.answer });
             }
         });
-
         if (vscode) {
             vscode.postMessage({
                 type: 'passContext',
@@ -541,45 +748,425 @@
 
     btnDelete.addEventListener('click', () => {
         if (!selectedNode) return;
-        
         if (vscode) {
-            vscode.postMessage({
-                type: 'deleteNode',
-                nodeId: selectedNode.id
-            });
+            vscode.postMessage({ type: 'deleteNode', nodeId: selectedNode.id });
             hidePanel();
         }
     });
 
-    // Real-time search query filtering
-    searchInput.addEventListener('input', e => {
-        const query = e.target.value.toLowerCase().trim();
-        searchHighlightIds.clear();
-        
-        if (query.length > 1) {
-            rawNodes.forEach(node => {
-                const labelText = node.label.toLowerCase();
-                const questionText = (node.details && node.details.question) ? node.details.question.toLowerCase() : '';
-                const answerText = (node.details && node.details.answer) ? node.details.answer.toLowerCase() : '';
+    // VIEW 2: Timeline Stream Rendering
+    function renderTimeline() {
+        if (currentView !== 'timeline') return; // Performance: lazy render only when timeline is active
+        timelineStream.innerHTML = '';
+        const conversations = {};
+        rawNodes.forEach(n => {
+            if (n.type === 'qa' && n.details) {
+                const cId = n.details.conversationId || 'general';
+                if (!conversations[cId]) conversations[cId] = [];
+                conversations[cId].push(n);
+            }
+        });
 
-                if (labelText.includes(query) || questionText.includes(query) || answerText.includes(query)) {
-                    searchHighlightIds.add(node.id);
-                    
-                    // Auto-expand parent Chat Session if Q&A matches query
-                    if (node.type === 'qa' && node.details && node.details.conversationId) {
-                        collapsedConversationIds.delete(node.details.conversationId);
-                    }
-                }
-            });
-            calculateTreeLayout();
+        const activeSessions = Object.keys(conversations);
+        if (activeSessions.length === 0) {
+            timelineStream.innerHTML = '<div style="text-align: center; color: #64748b; padding: 40px 0;">No memories recorded yet.</div>';
+            return;
         }
+
+        // Bounded rendering: show latest timelineSessionLimit sessions to keep DOM ultra-light
+        const displayedSessionIds = activeSessions.slice(-timelineSessionLimit).reverse();
+
+        displayedSessionIds.forEach((cId) => {
+            const sIdx = activeSessions.indexOf(cId);
+            const items = conversations[cId].filter(n => isNodeMatchingFilters(n));
+            if (items.length === 0) return;
+
+            const groupDiv = document.createElement('div');
+            groupDiv.className = 'timeline-session-group';
+
+            const header = document.createElement('div');
+            header.className = 'timeline-session-header';
+            header.innerHTML = `<span>💬 Chat Session ${sIdx + 1}</span> <span style="font-weight: 400; color: #64748b;">(${items.length} steps)</span>`;
+            groupDiv.appendChild(header);
+
+            items.forEach(node => {
+                const card = document.createElement('div');
+                card.className = 'timeline-card';
+                card.addEventListener('click', () => selectNode(node));
+
+                const catColor = NODE_COLORS[node.category] || NODE_COLORS['General'];
+                const isPinned = pinnedNodeIds.has(node.id);
+
+                card.innerHTML = `
+                    <div class="card-top">
+                        <span class="card-step-badge">${node.label}</span>
+                        <span class="badge" style="background: rgba(255,255,255,0.06); color: ${catColor}; border: 1px solid ${catColor}44;">${node.category}</span>
+                    </div>
+                    <div class="card-question">${escapeHtml(node.details.question)}</div>
+                    <div class="card-answer">${escapeHtml(node.details.answer)}</div>
+                    <div class="card-footer">
+                        <div class="card-tags">
+                            ${(node.details.tags || []).map(t => `<span class="tag-pill">#${escapeHtml(t)}</span>`).join('')}
+                        </div>
+                        <button class="action-btn" style="padding: 3px 8px; font-size: 10px;" onclick="event.stopPropagation(); window.togglePinNode('${node.id}')">
+                            ${isPinned ? '📌 Pinned' : '📌 Pin'}
+                        </button>
+                    </div>
+                `;
+                groupDiv.appendChild(card);
+            });
+
+            timelineStream.appendChild(groupDiv);
+        });
+
+        if (activeSessions.length > timelineSessionLimit) {
+            const moreSessionsDiv = document.createElement('div');
+            moreSessionsDiv.style.textAlign = 'center';
+            moreSessionsDiv.style.padding = '16px 0';
+            moreSessionsDiv.innerHTML = `<button class="action-btn" id="btn-load-more-timeline" style="padding: 8px 16px; font-size: 11px;">Load Earlier Sessions (${activeSessions.length - timelineSessionLimit} remaining)</button>`;
+            moreSessionsDiv.querySelector('#btn-load-more-timeline').addEventListener('click', () => {
+                timelineSessionLimit += 10;
+                renderTimeline();
+            });
+            timelineStream.appendChild(moreSessionsDiv);
+        }
+    }
+
+    // VIEW 3: Category Board Rendering
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    // VIEW 3: Context Recovery Deck Rendering
+    function renderBoard() {
+        if (currentView !== 'board') return; // Performance: lazy render only when board is active
+
+        // 1. Column 1: Invariants & Rules (Tier 0)
+        colCardsInvariants.innerHTML = '';
+        const activeInvariants = rawInvariants.filter(r => r.status === 'ACTIVE');
+        countInvariants.innerText = activeInvariants.length;
+
+        if (activeInvariants.length === 0) {
+            colCardsInvariants.innerHTML = `
+                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
+                    No active constraints.<br>
+                    <span style="font-size: 10px; opacity: 0.8;">Click "+ Rule" above to register an un-breakable Tier 0 rule.</span>
+                </div>
+            `;
+        } else {
+            activeInvariants.forEach(inv => {
+                const card = document.createElement('div');
+                card.className = 'deck-card invariant-card';
+
+                const scopeBadge = inv.scope && inv.scope !== 'global' 
+                    ? `<span class="step-pill" style="font-size: 8px;">${escapeHtml(inv.scope)}</span>` 
+                    : '';
+                const typeLabel = (inv.ruleType || 'RULE').replace(/_/g, ' ');
+
+                card.innerHTML = `
+                    <div class="card-meta-row">
+                        <span class="mono-badge">${escapeHtml(typeLabel)}</span>
+                        <button class="revoke-btn" onclick="event.stopPropagation(); window.revokeInvariant('${inv.id}')" title="Revoke rule to avoid prompt deadlocks">
+                            Revoke
+                        </button>
+                    </div>
+                    <div class="invariant-content">${escapeHtml(inv.content)}</div>
+                    <div class="card-sub-row">
+                        ${scopeBadge}
+                        <span style="font-family: monospace; color: #475569;">id:${inv.id}</span>
+                    </div>
+                `;
+                colCardsInvariants.appendChild(card);
+            });
+        }
+
+        // 2. Column 2: Causal File Timeline (Tier 1 & 2)
+        colCardsFiles.innerHTML = '';
+        countFiles.innerText = rawFileActions.length;
+
+        if (rawFileActions.length === 0) {
+            colCardsFiles.innerHTML = `
+                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
+                    No file modifications tracked yet.
+                </div>
+            `;
+        } else {
+            // Paginated file modifications
+            const recentFiles = rawFileActions.slice(-fileDeckLimit).reverse();
+            recentFiles.forEach(fa => {
+                const card = document.createElement('div');
+                card.className = 'deck-card file-card';
+
+                const normPath = (fa.filePath || '').replace(/\\/g, '/');
+                const parts = normPath.split('/');
+                const fileName = parts.pop() || normPath;
+                const dirPath = parts.slice(-2).join('/');
+
+                const isLarge = fa.diffSummary && fa.diffSummary.startsWith('[LARGE DIFF');
+                let diffBlock = '';
+                if (isLarge) {
+                    diffBlock = `<div class="diff-breadcrumb-box">${escapeHtml(fa.diffSummary)}</div>`;
+                } else if (fa.diffSummary && fa.diffSummary.trim().length > 0) {
+                    const lines = fa.diffSummary.trim().split('\n').slice(0, 6);
+                    const styledLines = lines.map(l => {
+                        const escaped = escapeHtml(l);
+                        if (l.startsWith('+') && !l.startsWith('+++')) {
+                            return `<span style="color: #4ade80;">${escaped}</span>`;
+                        } else if (l.startsWith('-') && !l.startsWith('---')) {
+                            return `<span style="color: #f87171;">${escaped}</span>`;
+                        }
+                        return `<span style="color: #64748b;">${escaped}</span>`;
+                    }).join('\n');
+                    diffBlock = `<pre class="diff-preview-box">${styledLines}</pre>`;
+                }
+
+                card.innerHTML = `
+                    <div class="card-meta-row">
+                        <span class="step-pill">Step ${fa.stepIndex}</span>
+                        <span class="action-tag action-${fa.action}">${fa.action.toUpperCase()}</span>
+                    </div>
+                    <div class="file-name-row">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8; flex-shrink: 0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                        <span class="file-basename">${escapeHtml(fileName)}</span>
+                    </div>
+                    ${dirPath ? `<div class="file-dirname">${escapeHtml(dirPath)}/</div>` : ''}
+                    ${fa.intent ? `<div class="file-intent">"${escapeHtml(fa.intent)}"</div>` : ''}
+                    ${diffBlock}
+                    <div class="card-sub-row">
+                        <span style="font-family: monospace;">sha:${fa.fileHashAfter}</span>
+                        <span>+${fa.linesAdded} / -${fa.linesRemoved}</span>
+                    </div>
+                `;
+                colCardsFiles.appendChild(card);
+            });
+
+            if (rawFileActions.length > fileDeckLimit) {
+                const moreFilesDiv = document.createElement('div');
+                moreFilesDiv.style.textAlign = 'center';
+                moreFilesDiv.style.padding = '8px 0';
+                moreFilesDiv.innerHTML = `<button class="action-btn" id="btn-load-more-files" style="width: 100%; font-size: 11px; padding: 6px;">Show Older Modifications (${rawFileActions.length - fileDeckLimit} remaining)</button>`;
+                moreFilesDiv.querySelector('#btn-load-more-files').addEventListener('click', () => {
+                    fileDeckLimit += 30;
+                    renderBoard();
+                });
+                colCardsFiles.appendChild(moreFilesDiv);
+            }
+        }
+
+        // 3. Column 3: Chronological Sessions
+        colCardsSessions.innerHTML = '';
+        const sessionNodes = rawNodes.filter(n => n.type === 'chat_session');
+        countSessions.innerText = sessionNodes.length;
+
+        if (sessionNodes.length === 0) {
+            colCardsSessions.innerHTML = `
+                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
+                    No active chat sessions.
+                </div>
+            `;
+        } else {
+            const displayedSessions = sessionNodes.slice(-sessionDeckLimit).reverse();
+            displayedSessions.forEach((s) => {
+                const originalIndex = sessionNodes.indexOf(s);
+                const card = document.createElement('div');
+                card.className = 'deck-card session-card';
+                card.addEventListener('click', () => {
+                    selectNode(s);
+                    setView('graph');
+                });
+
+                const memberCount = rawLinks.filter(l => l.source === s.id && l.type === 'session_member').length;
+                let title = (s.fullTitle || s.label || '').replace(/^💬\s*"/, '').replace(/"$/, '');
+
+                card.innerHTML = `
+                    <div class="card-meta-row">
+                        <span class="session-number">Session ${originalIndex + 1}</span>
+                        <span class="session-steps-tag">${memberCount} steps</span>
+                    </div>
+                    <div class="session-title">${escapeHtml(title)}</div>
+                `;
+                colCardsSessions.appendChild(card);
+            });
+
+            if (sessionNodes.length > sessionDeckLimit) {
+                const moreSessionsDiv = document.createElement('div');
+                moreSessionsDiv.style.textAlign = 'center';
+                moreSessionsDiv.style.padding = '8px 0';
+                moreSessionsDiv.innerHTML = `<button class="action-btn" id="btn-load-more-sessions" style="width: 100%; font-size: 11px; padding: 6px;">Show Earlier Sessions (${sessionNodes.length - sessionDeckLimit} remaining)</button>`;
+                moreSessionsDiv.querySelector('#btn-load-more-sessions').addEventListener('click', () => {
+                    sessionDeckLimit += 20;
+                    renderBoard();
+                });
+                colCardsSessions.appendChild(moreSessionsDiv);
+            }
+        }
+
+        // 4. Column 4: Context Cart (Active Working Set)
+        colCardsCart.innerHTML = '';
+        const cartNodes = rawNodes.filter(n => pinnedNodeIds.has(n.id));
+        countCart.innerText = cartNodes.length;
+
+        if (cartNodes.length === 0) {
+            colCardsCart.innerHTML = `
+                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
+                    Cart is empty.<br>
+                    <span style="font-size: 10px; opacity: 0.8;">Pin nodes across Canvas or Timeline to stage them for agent injection.</span>
+                </div>
+            `;
+        } else {
+            cartNodes.forEach(node => {
+                const card = document.createElement('div');
+                card.className = 'deck-card';
+                card.addEventListener('click', () => selectNode(node));
+
+                card.innerHTML = `
+                    <div class="card-meta-row">
+                        <span class="step-pill">${escapeHtml(node.label)}</span>
+                        <button class="revoke-btn" onclick="event.stopPropagation(); window.togglePinNode('${node.id}')">
+                            Remove
+                        </button>
+                    </div>
+                    <div style="font-size: 11px; color: #f1f5f9; margin-top: 3px;">${escapeHtml(node.details ? node.details.question : '')}</div>
+                `;
+                colCardsCart.appendChild(card);
+            });
+        }
+    }
+
+    window.revokeInvariant = function(id) {
+        if (vscode) {
+            vscode.postMessage({
+                type: 'revokeInvariant',
+                ruleId: id,
+                reason: 'Revoked via Recovery Deck'
+            });
+        }
+    };
+
+    window.togglePinNode = function(id) {
+        if (pinnedNodeIds.has(id)) {
+            pinnedNodeIds.delete(id);
+        } else {
+            pinnedNodeIds.add(id);
+        }
+        updateCartUI();
         draw();
+        renderTimeline();
+        renderBoard();
+        if (selectedNode && selectedNode.id === id) selectNode(selectedNode);
+    };
+
+    // Rehydrate Agent Triggers
+    function triggerRehydrate() {
+        if (vscode) {
+            vscode.postMessage({ type: 'rehydrateAgent' });
+        }
+    }
+
+    if (btnPruneHeader) {
+        btnPruneHeader.addEventListener('click', () => {
+            if (vscode) {
+                vscode.postMessage({ type: 'pruneForeign' });
+            }
+        });
+    }
+
+    if (btnRehydrateHeader) btnRehydrateHeader.addEventListener('click', triggerRehydrate);
+    if (btnRehydrateCol) btnRehydrateCol.addEventListener('click', triggerRehydrate);
+
+    // Invariant Modal Actions
+    if (btnAddInvariantCol) {
+        btnAddInvariantCol.addEventListener('click', () => {
+            modalAddInvariant.classList.remove('hidden');
+            inputInvariantContent.focus();
+        });
+    }
+
+    function closeInvariantModal() {
+        modalAddInvariant.classList.add('hidden');
+        inputInvariantContent.value = '';
+        inputInvariantScope.value = 'global';
+    }
+
+    if (btnCloseModalInvariant) btnCloseModalInvariant.addEventListener('click', closeInvariantModal);
+    if (btnCancelModalInvariant) btnCancelModalInvariant.addEventListener('click', closeInvariantModal);
+
+    if (btnSaveInvariant) {
+        btnSaveInvariant.addEventListener('click', () => {
+            const content = inputInvariantContent.value.trim();
+            const ruleType = selectInvariantType.value;
+            const scope = inputInvariantScope.value.trim() || 'global';
+
+            if (!content) {
+                inputInvariantContent.focus();
+                return;
+            }
+
+            if (vscode) {
+                vscode.postMessage({
+                    type: 'addInvariant',
+                    content,
+                    ruleType,
+                    scope
+                });
+            }
+            closeInvariantModal();
+        });
+    }
+
+    // View Switching
+    function setView(viewName) {
+        currentView = viewName;
+        tabGraph.classList.toggle('active', viewName === 'graph');
+        tabTimeline.classList.toggle('active', viewName === 'timeline');
+        tabBoard.classList.toggle('active', viewName === 'board');
+
+        viewGraph.classList.toggle('active', viewName === 'graph');
+        viewTimeline.classList.toggle('active', viewName === 'timeline');
+        viewBoard.classList.toggle('active', viewName === 'board');
+
+        if (viewName === 'graph') {
+            resizeCanvas();
+        } else if (viewName === 'timeline') {
+            renderTimeline();
+        } else if (viewName === 'board') {
+            renderBoard();
+        }
+    }
+
+    tabGraph.addEventListener('click', () => setView('graph'));
+    tabTimeline.addEventListener('click', () => setView('timeline'));
+    tabBoard.addEventListener('click', () => setView('board'));
+
+    // Category Filter Pills
+    filterPills.forEach(pill => {
+        pill.addEventListener('click', () => {
+            filterPills.forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            activeCategoryFilter = pill.dataset.category;
+            if (currentView === 'graph') draw();
+            if (currentView === 'timeline') renderTimeline();
+            if (currentView === 'board') renderBoard();
+        });
+    });
+
+    // Search Input Listener
+    searchInput.addEventListener('input', () => {
+        if (currentView === 'graph') draw();
+        if (currentView === 'timeline') renderTimeline();
+        if (currentView === 'board') renderBoard();
     });
 
     clearSearchBtn.addEventListener('click', () => {
         searchInput.value = '';
-        searchHighlightIds.clear();
-        draw();
+        if (currentView === 'graph') draw();
+        if (currentView === 'timeline') renderTimeline();
+        if (currentView === 'board') renderBoard();
     });
 
     // Listen to messages from TS Extension Host
@@ -588,15 +1175,22 @@
         if (msg.type === 'updateGraph') {
             rawNodes = msg.data.nodes || [];
             rawLinks = msg.data.links || [];
+            rawInvariants = msg.data.invariants || [];
+            rawFileActions = msg.data.fileActions || [];
             
-            // Verify pinned node IDs still exist in active memories
+            const qaCount = rawNodes.filter(n => n.type === 'qa').length;
+            statMemoryCount.innerText = `${qaCount} items`;
+
             const validIds = new Set(rawNodes.map(n => n.id));
             pinnedNodeIds = new Set(Array.from(pinnedNodeIds).filter(id => validIds.has(id)));
             updateCartUI();
 
             calculateTreeLayout();
+            if (currentView === 'timeline') renderTimeline();
+            if (currentView === 'board') renderBoard();
+
             if (selectedNode) {
-                const currentSelection = visibleNodes.find(n => n.id === selectedNode.id);
+                const currentSelection = rawNodes.find(n => n.id === selectedNode.id);
                 if (currentSelection) {
                     selectNode(currentSelection);
                 } else {
@@ -606,8 +1200,8 @@
         }
     });
 
-    // Initialize layout and notify ready state
-    resizeCanvas();
+    // Initialize Layout & View
+    setView('board');
     if (vscode) {
         vscode.postMessage({ type: 'ready' });
     }

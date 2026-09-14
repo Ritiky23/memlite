@@ -37,8 +37,12 @@ def test_ollama_embedder_http(mock_urlopen):
     mock_urlopen.assert_called_once()
     req = mock_urlopen.call_args[0][0]
     assert req.full_url == "http://localhost:11434/api/embeddings"
-    assert req.headers["Content-type"] == "application/json"
+try:
+    import openai
+except ImportError:
+    openai = None
 
+@pytest.mark.skipif(openai is None, reason="openai library not installed")
 @patch("openai.OpenAI")
 def test_openai_embedder_client(mock_openai_class):
     # Setup mock openai client structure

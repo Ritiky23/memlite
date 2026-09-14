@@ -11,12 +11,18 @@ let activePanel: vscode.WebviewPanel | undefined = undefined;
 export function activate(context: vscode.ExtensionContext) {
     console.log('MemLite: Extension is now active!');
 
-    // Initialize database in the global storage path (cross-workspace global memory)
-    const storagePath = context.globalStorageUri.fsPath;
+    // Initialize database in workspace storage if available, falling back to global storage
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const storagePath = context.storageUri ? context.storageUri.fsPath : context.globalStorageUri.fsPath;
     const db = new MemoryDatabase(storagePath);
 
-    // Initialize and start log watcher
-    watcher = new TranscriptWatcher(db);
+    // Auto-clean any records that originated from foreign projects
+    if (workspaceRoot) {
+        db.pruneForeignRecords(workspaceRoot);
+    }
+
+    // Initialize and start log watcher scoped to workspace
+    watcher = new TranscriptWatcher(db, workspaceRoot);
     watcher.start();
 
     // Register sidebar Webview View
@@ -109,8 +115,37 @@ export function activate(context: vscode.ExtensionContext) {
                     case 'exportContextFile':
                         await vscode.commands.executeCommand('memlite.exportContextFile', message.items);
                         break;
+                    case 'addInvariant':
+                        db.addInvariant(message.content, message.ruleType, message.scope);
+                        provider.refresh();
+                        panel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                        vscode.window.showInformationMessage(`🔒 MemLite: Invariant Rule added!`);
+                        break;
+                    case 'revokeInvariant':
+                        db.revokeInvariant(message.ruleId, message.reason);
+                        provider.refresh();
+                        panel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                        vscode.window.showInformationMessage(`🔓 MemLite: Invariant Rule revoked!`);
+                        break;
+                    case 'rehydrateAgent':
+                        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                        const capsule = db.generateRehydrateCapsule(root);
+                        const contextPath = path.join(root, '.memlite_context.md');
+                        try {
+                            fs.writeFileSync(contextPath, capsule, 'utf8');
+                            await vscode.env.clipboard.writeText(capsule);
+                            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(contextPath));
+                            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, false);
+                            vscode.window.showInformationMessage("⚡ MemLite: Agent Rehydration Capsule generated & copied to clipboard!");
+                        } catch (e) {
+                            vscode.window.showErrorMessage(`MemLite: Failed to write context capsule: ${e}`);
+                        }
+                        break;
                     case 'clearDatabase':
                         await vscode.commands.executeCommand('memlite.clearDatabase');
+                        break;
+                    case 'pruneForeign':
+                        await vscode.commands.executeCommand('memlite.pruneForeignMemories');
                         break;
                 }
             });
@@ -172,8 +207,28 @@ export function activate(context: vscode.ExtensionContext) {
             if (choice === 'Yes, delete everything') {
                 db.clearDB();
                 provider.refresh();
+                if (activePanel) {
+                    activePanel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                }
                 vscode.window.showInformationMessage('MemLite: All memories cleared.');
             }
+        })
+    );
+
+    // Command: Prune Foreign & Stale Project Memories
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.pruneForeignMemories', () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) {
+                vscode.window.showWarningMessage('MemLite: No active workspace folder found.');
+                return;
+            }
+            const { removedNodes, removedActions } = db.pruneForeignRecords(root);
+            provider.refresh();
+            if (activePanel) {
+                activePanel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+            }
+            vscode.window.showInformationMessage(`MemLite: Pruned ${removedNodes} foreign memories and ${removedActions} foreign file actions.`);
         })
     );
 

@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from memlite import Memory
 from memlite.config import MemLiteConfig
 from memlite.models import MemoryItem
@@ -29,7 +29,8 @@ def test_forgetting_system_cleanup(temp_db):
     memory.embedder = MockEmbedder()
     memory.retriever.embedder = MockEmbedder()
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+
     
     # 1. Important recent memory: should not decay below threshold
     item_important = MemoryItem(

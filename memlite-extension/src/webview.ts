@@ -51,15 +51,66 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
                     await vscode.env.clipboard.writeText(message.text);
                     vscode.window.showInformationMessage("🧠 MemLite: Copied combined context to clipboard!");
                     break;
+                case 'addRecord':
+                    this._db.addRecord(
+                        message.question,
+                        message.answer || '',
+                        message.project || 'memlite',
+                        message.fileRef,
+                        message.tags || [],
+                        message.conversationId || `manual_${Date.now()}`,
+                        1
+                    );
+                    this.refresh();
+                    vscode.window.showInformationMessage(`🧠 MemLite: Memory added successfully!`);
+                    break;
                 case 'exportContextFile':
                     await vscode.commands.executeCommand('memlite.exportContextFile', message.items);
+                    break;
+                case 'createRelation':
+                    this._db.addRelationship(message.source, message.target, message.relationType || 'SIMILAR');
+                    this.refresh();
+                    vscode.window.showInformationMessage(`🧠 MemLite: Linked nodes as ${message.relationType || 'SIMILAR'}`);
+                    break;
+                case 'deleteRelation':
+                    this._db.deleteRelationship(message.source, message.target);
+                    this.refresh();
+                    vscode.window.showInformationMessage(`🧠 MemLite: Relation removed`);
+                    break;
+                case 'addInvariant':
+                    this._db.addInvariant(message.content, message.ruleType, message.scope);
+                    this.refresh();
+                    vscode.window.showInformationMessage(`🔒 MemLite: Invariant Rule added!`);
+                    break;
+                case 'revokeInvariant':
+                    this._db.revokeInvariant(message.ruleId, message.reason);
+                    this.refresh();
+                    vscode.window.showInformationMessage(`🔓 MemLite: Invariant Rule revoked!`);
+                    break;
+                case 'rehydrateAgent':
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+                    const capsule = this._db.generateRehydrateCapsule(root);
+                    const contextPath = path.join(root, '.memlite_context.md');
+                    try {
+                        fs.writeFileSync(contextPath, capsule, 'utf8');
+                        await vscode.env.clipboard.writeText(capsule);
+                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(contextPath));
+                        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, false);
+                        vscode.window.showInformationMessage("⚡ MemLite: Agent Rehydration Capsule generated & copied to clipboard!");
+                    } catch (e) {
+                        vscode.window.showErrorMessage(`MemLite: Failed to write context capsule: ${e}`);
+                    }
                     break;
                 case 'clearDatabase':
                     await vscode.commands.executeCommand('memlite.clearDatabase');
                     break;
+                case 'pruneForeign':
+                    await vscode.commands.executeCommand('memlite.pruneForeignMemories');
+                    break;
             }
         });
     }
+
 
     public refresh() {
         if (this._view) {

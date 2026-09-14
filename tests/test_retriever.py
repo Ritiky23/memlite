@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from memlite.config import MemLiteConfig
 from memlite.models import MemoryItem
 from memlite.storage import SQLiteStorage
@@ -40,7 +40,8 @@ def test_hybrid_retrieval_and_numpy_fallback(temp_db):
     user_id = "user_dev"
     
     # 1. Add some records to storage
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+
     
     # Python record: high similarity to "python coding", high importance (0.9), fresh
     item1 = MemoryItem(

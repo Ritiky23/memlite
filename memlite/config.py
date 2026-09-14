@@ -1,17 +1,19 @@
 import os
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Dict
+from pydantic import BaseModel, Field, ConfigDict
 
 class MemLiteConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     # Storage settings
     db_path: str = Field(
         default_factory=lambda: os.environ.get("MEMLITE_DB_PATH", os.path.expanduser("~/.memlite/memlite.db"))
     )
     
     # Embedding settings
-    # Options: "local" (sentence-transformers), "openai", "ollama"
+    # Options: "fastembed" (ONNX, default), "local" (sentence-transformers), "openai", "ollama"
     embedding_provider: str = Field(
-        default_factory=lambda: os.environ.get("MEMLITE_EMBEDDING_PROVIDER", "local")
+        default_factory=lambda: os.environ.get("MEMLITE_EMBEDDING_PROVIDER", "fastembed")
     )
     embedding_model: str = Field(
         default_factory=lambda: os.environ.get("MEMLITE_EMBEDDING_MODEL", "")
@@ -28,21 +30,48 @@ class MemLiteConfig(BaseModel):
         default_factory=lambda: os.environ.get("MEMLITE_LLM_MODEL", "")
     )
     
-    # Retrieval weights (must sum to 1.0 ideally, but normalized in calculation)
+    # Retrieval & Search weights
+    hybrid_search: bool = True
+    keyword_weight: float = 0.3
     similarity_weight: float = 0.5
-    importance_weight: float = 0.3
-    recency_weight: float = 0.2
+    importance_weight: float = 0.1
+    recency_weight: float = 0.1
     
     # Forgetting & decay parameters
-    # decay_rate per day (e.g. 0.005 means memory score reduces by ~0.5% each day)
+    # Default decay_rate per day (0.005 = ~0.5% per day)
     decay_rate: float = 0.005
     archive_threshold: float = 0.15
+    
+    # Multipliers applied to base decay_rate per category
+    category_decay_multipliers: Dict[str, float] = Field(
+        default_factory=lambda: {
+            "Personal": 0.02,
+            "Preference": 0.1,
+            "Skill": 0.1,
+            "Project": 0.4,
+            "General": 1.0,
+            "Temporary": 4.0,
+        }
+    )
+
+    # Optional absolute category decay rate overrides (per day)
+    category_decay_rates: Dict[str, float] = Field(default_factory=dict)
+    
+    def get_decay_rate(self, category: str) -> float:
+        """Calculate effective decay rate for a category."""
+        if self.category_decay_rates and category in self.category_decay_rates:
+            return self.category_decay_rates[category]
+        multiplier = self.category_decay_multipliers.get(category, 1.0)
+        return self.decay_rate * multiplier
+
     
     def model_post_init(self, __context) -> None:
         # Set default embedding models if not specified
         if not self.embedding_model:
             if self.embedding_provider == "local":
                 self.embedding_model = "all-MiniLM-L6-v2"
+            elif self.embedding_provider == "fastembed":
+                self.embedding_model = "BAAI/bge-small-en-v1.5"
             elif self.embedding_provider == "openai":
                 self.embedding_model = "text-embedding-3-small"
             elif self.embedding_provider == "ollama":
@@ -58,4 +87,5 @@ class MemLiteConfig(BaseModel):
                 self.llm_model = "llama3"
             else:
                 self.llm_model = ""
+
 

@@ -2,6 +2,30 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
+export interface InvariantItem {
+    id: string;
+    ruleType: "NEGATIVE_CONSTRAINT" | "ARCHITECTURAL_DECISION" | "PREFERENCE";
+    content: string;
+    scope: string; // "global" | "file:<path>"
+    status: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+    supersededBy?: string;
+    revokedReason?: string;
+    createdAt: string;
+}
+
+export interface FileActionItem {
+    id: string;
+    stepIndex: number;
+    filePath: string;
+    action: "created" | "modified" | "deleted";
+    fileHashAfter: string;
+    intent: string;
+    diffSummary: string;
+    linesAdded: number;
+    linesRemoved: number;
+    timestamp: string;
+}
+
 export interface MemoryNode {
     id: string;
     question: string;
@@ -9,6 +33,8 @@ export interface MemoryNode {
     timestamp: string;
     project: string;
     fileRef?: string;
+    filesTouched?: string[];
+    contextType?: "decision" | "code_change" | "milestone" | "discussion";
     tags: string[];
     conversationId?: string;
     stepIndex?: number;
@@ -23,18 +49,21 @@ export interface Relationship {
 export interface DatabaseSchema {
     nodes: MemoryNode[];
     relationships: Relationship[];
+    invariants: InvariantItem[];
+    fileActions: FileActionItem[];
 }
 
 export class MemoryDatabase {
     private dbPath: string;
     private data: DatabaseSchema;
+    private indexedSteps: Set<string> = new Set();
 
     constructor(storagePath: string) {
         if (!fs.existsSync(storagePath)) {
             fs.mkdirSync(storagePath, { recursive: true });
         }
         this.dbPath = path.join(storagePath, 'memlite_db.json');
-        this.data = { nodes: [], relationships: [] };
+        this.data = { nodes: [], relationships: [], invariants: [], fileActions: [] };
         this.load();
     }
 
@@ -43,16 +72,29 @@ export class MemoryDatabase {
             try {
                 const raw = fs.readFileSync(this.dbPath, 'utf8');
                 this.data = JSON.parse(raw);
-                // Ensure array structures
                 if (!this.data.nodes) { this.data.nodes = []; }
                 if (!this.data.relationships) { this.data.relationships = []; }
+                if (!this.data.invariants) { this.data.invariants = []; }
+                if (!this.data.fileActions) { this.data.fileActions = []; }
             } catch (e) {
                 console.error("Failed to load MemLite database, resetting:", e);
-                this.data = { nodes: [], relationships: [] };
+                this.data = { nodes: [], relationships: [], invariants: [], fileActions: [] };
             }
         } else {
             this.save();
         }
+
+        this.indexedSteps.clear();
+        this.data.nodes.forEach(n => {
+            if (n.conversationId && n.stepIndex !== undefined) {
+                this.indexedSteps.add(`${n.conversationId}_${n.stepIndex}`);
+            }
+            if (n.tags) {
+                n.tags.forEach(t => {
+                    if (t.includes('_')) this.indexedSteps.add(t);
+                });
+            }
+        });
     }
 
     public save() {
@@ -70,15 +112,26 @@ export class MemoryDatabase {
         fileRef?: string,
         manualTags: string[] = [],
         conversationId?: string,
-        stepIndex?: number
+        stepIndex?: number,
+        filesTouched?: string[],
+        contextType?: "decision" | "code_change" | "milestone" | "discussion"
     ): MemoryNode {
         const id = crypto.randomUUID();
-        
-        // Auto-extract tag keywords from question and answer (simple tokenizer)
         const extractedTags = this.extractTags(question + " " + answer);
         const uniqueTags = Array.from(new Set([...manualTags, ...extractedTags]))
             .map(t => t.toLowerCase())
             .filter(t => t.length > 2 && !this.isStopword(t));
+
+        // Determine context type cleanly without naive regex
+        if (!contextType) {
+            if (filesTouched && filesTouched.length > 0) {
+                contextType = "code_change";
+            } else if (uniqueTags.includes("decision") || uniqueTags.includes("rule")) {
+                contextType = "decision";
+            } else {
+                contextType = "discussion";
+            }
+        }
 
         const newNode: MemoryNode = {
             id,
@@ -87,30 +140,174 @@ export class MemoryDatabase {
             timestamp: new Date().toISOString(),
             project: project || "Default Project",
             fileRef,
+            filesTouched: filesTouched || [],
+            contextType,
             tags: uniqueTags,
             conversationId,
             stepIndex
         };
 
         this.data.nodes.push(newNode);
-
-        // Auto-link to related nodes
+        if (conversationId && stepIndex !== undefined) {
+            this.indexedSteps.add(`${conversationId}_${stepIndex}`);
+        }
+        manualTags.forEach(t => {
+            if (t.includes('_')) this.indexedSteps.add(t);
+        });
         this.createAutoRelationships(newNode);
-
         this.save();
         return newNode;
     }
 
+    public hasStep(stepKey: string): boolean {
+        return this.indexedSteps.has(stepKey);
+    }
+
+    // --- Invariants (Tier 0) Methods ---
+    public addInvariant(
+        content: string,
+        ruleType: "NEGATIVE_CONSTRAINT" | "ARCHITECTURAL_DECISION" | "PREFERENCE" = "NEGATIVE_CONSTRAINT",
+        scope: string = "global",
+        supersedesId?: string
+    ): InvariantItem {
+        const id = crypto.randomUUID().substring(0, 8);
+        const newRule: InvariantItem = {
+            id,
+            ruleType,
+            content: content.trim(),
+            scope: scope || "global",
+            status: "ACTIVE",
+            createdAt: new Date().toISOString()
+        };
+
+        if (supersedesId) {
+            const old = this.data.invariants.find(r => r.id === supersedesId);
+            if (old) {
+                old.status = "SUPERSEDED";
+                old.supersededBy = id;
+            }
+        }
+
+        this.data.invariants.push(newRule);
+        this.save();
+        return newRule;
+    }
+
+    public revokeInvariant(ruleId: string, reason: string = ""): InvariantItem | null {
+        const rule = this.data.invariants.find(r => r.id === ruleId);
+        if (!rule) return null;
+        rule.status = "REVOKED";
+        rule.revokedReason = reason;
+        this.save();
+        return rule;
+    }
+
+    public getActiveInvariants(scope?: string): InvariantItem[] {
+        return this.data.invariants.filter(r => {
+            if (r.status !== "ACTIVE") return false;
+            if (scope && r.scope !== "global" && r.scope !== scope) return false;
+            return true;
+        });
+    }
+
+    // --- File Provenance (Tier 1 & 2) Methods ---
+    public recordFileAction(actionItem: FileActionItem) {
+        this.data.fileActions.push(actionItem);
+        this.save();
+    }
+
+    public checkFileFreshness(workspaceRoot: string): { stale: { file: string; warning: string }[]; freshCount: number } {
+        const stale: { file: string; warning: string }[] = [];
+        let freshCount = 0;
+
+        // Group by file path to get latest recorded hash
+        const latestByFile: { [path: string]: FileActionItem } = {};
+        this.data.fileActions.forEach(fa => {
+            latestByFile[fa.filePath] = fa;
+        });
+
+        Object.keys(latestByFile).forEach(relPath => {
+            const absPath = path.isAbsolute(relPath) ? relPath : path.join(workspaceRoot, relPath);
+            if (!fs.existsSync(absPath)) {
+                stale.push({ file: relPath, warning: `⚠️ MISSING: '${relPath}' deleted on disk.` });
+                return;
+            }
+            try {
+                const rawContent = fs.readFileSync(absPath, 'utf8');
+                const normalized = rawContent.replace(/\r\n/g, '\n').trim();
+                const currentHash = crypto.createHash('sha256').update(normalized, 'utf8').digest('hex').substring(0, 16);
+                if (currentHash !== latestByFile[relPath].fileHashAfter) {
+                    stale.push({ file: relPath, warning: `⚠️ STALE: '${relPath}' modified on disk since step ${latestByFile[relPath].stepIndex}.` });
+                } else {
+                    freshCount++;
+                }
+            } catch (e) {
+                // Ignore inaccessible files
+            }
+        });
+
+        return { stale, freshCount };
+    }
+
+    public generateRehydrateCapsule(workspaceRoot?: string): string {
+        let md = `# ⚡ MEMLITE AGENT RECOVERY CAPSULE\nGenerated: ${new Date().toISOString()}\n\n`;
+
+        // Tier 0: Invariants
+        const activeInvariants = this.getActiveInvariants();
+        md += `## 🔒 Tier 0: Invariants & Constraints (Verbatim Contract)\n`;
+        if (activeInvariants.length === 0) {
+            md += `No active constraints registered.\n\n`;
+        } else {
+            activeInvariants.forEach(inv => {
+                const scopeBadge = inv.scope !== "global" ? ` (${inv.scope})` : "";
+                md += `- [${inv.ruleType}] ${inv.content}${scopeBadge} [id:${inv.id}]\n`;
+            });
+            md += `\n`;
+        }
+
+        // Tier 1: Causal File Provenance (Last 5 actions)
+        const recentActions = this.data.fileActions.slice(-5);
+        md += `## ⚡ Tier 1: Causal File Provenance (Recent Action Timeline)\n`;
+        if (recentActions.length === 0) {
+            md += `No recent file modifications recorded.\n\n`;
+        } else {
+            recentActions.forEach(fa => {
+                md += `- Step ${fa.stepIndex} | \`${fa.filePath}\` [${fa.action.toUpperCase()}] (SHA: ${fa.fileHashAfter})\n`;
+                md += `  Intent: "${fa.intent}"\n`;
+                if (fa.diffSummary.startsWith("[LARGE DIFF")) {
+                    md += `  ${fa.diffSummary}\n`;
+                } else {
+                    const firstLines = fa.diffSummary.split('\n').slice(0, 5).join('\n    ');
+                    md += `  Diff:\n    ${firstLines}\n`;
+                }
+            });
+            md += `\n`;
+        }
+
+        // Tier 2: Freshness Reality Check
+        if (workspaceRoot && fs.existsSync(workspaceRoot)) {
+            const freshness = this.checkFileFreshness(workspaceRoot);
+            md += `## 🛡️ Tier 2: Disk Reality Check (Freshness Verification)\n`;
+            if (freshness.stale.length === 0) {
+                md += `✅ All ${freshness.freshCount} tracked workspace files match recorded memory hashes.\n\n`;
+            } else {
+                freshness.stale.forEach(s => {
+                    md += `- ${s.warning} Inspect disk before editing.\n`;
+                });
+                md += `\n`;
+            }
+        }
+
+        return md;
+    }
+
     private extractTags(text: string): string[] {
-        // Match code concepts (words, capitalized terms, code tokens)
         const words = text.match(/[a-zA-Z]{3,20}/g) || [];
-        // Look for programming keywords or specific database concepts
         const programmingKeywords = [
             "python", "react", "fastapi", "postgres", "sqlite", "javascript", "typescript",
             "rust", "git", "api", "database", "query", "server", "model", "index", "faiss",
-            "node", "embeddings", "context", "allergy", "peanuts"
+            "node", "embeddings", "decision", "rule", "architecture"
         ];
-        
         return words.filter(word => {
             const lowWord = word.toLowerCase();
             return programmingKeywords.includes(lowWord) || (word[0] === word[0].toUpperCase() && word.length > 3);
@@ -123,13 +320,8 @@ export class MemoryDatabase {
     }
 
     private createAutoRelationships(node: MemoryNode) {
-        // Link to other Q&As sharing:
-        // 1. Same fileRef
-        // 2. Overlapping tags
         this.data.nodes.forEach(other => {
             if (other.id === node.id) { return; }
-
-            // Link by file reference
             if (node.fileRef && other.fileRef && node.fileRef === other.fileRef) {
                 this.data.relationships.push({
                     source: node.id,
@@ -137,78 +329,54 @@ export class MemoryDatabase {
                     type: "same_file"
                 });
             }
-
-            // Link by tag overlap (if they share 2 or more tags)
-            const overlap = node.tags.filter(t => other.tags.includes(t));
-            if (overlap.length >= 1) {
-                this.data.relationships.push({
-                    source: node.id,
-                    target: other.id,
-                    type: "related_topic"
-                });
-            }
         });
     }
 
-    /**
-     * Translates raw Q&As into visual nodes and edges for the graph UI.
-     */
-    public getGraphData(): { nodes: any[]; links: any[] } {
+    public getGraphData(): { nodes: any[]; links: any[]; invariants: InvariantItem[]; fileActions: FileActionItem[] } {
         const visualNodes: any[] = [];
         const visualLinks: any[] = [];
 
-        // Group nodes by conversationId to build chronological links
-        const convGroups: { [key: string]: MemoryNode[] } = {};
-
+        const convGroups: { [convId: string]: MemoryNode[] } = {};
         this.data.nodes.forEach(n => {
-            const cId = n.conversationId || "unknown_conv";
+            const cId = n.conversationId || "general_session";
             if (!convGroups[cId]) {
                 convGroups[cId] = [];
             }
             convGroups[cId].push(n);
         });
 
-        // Process each conversation group
         Object.keys(convGroups).forEach((cId, chatIndex) => {
             const group = convGroups[cId];
-            // Sort nodes in this group by stepIndex ascending to get chronological order
             group.sort((a, b) => (a.stepIndex ?? 0) - (b.stepIndex ?? 0));
-
             if (group.length === 0) return;
 
-            // Use the first question text as a friendly title for this chat session
             const firstNode = group[0];
             let chatTitle = firstNode.question.replace(/\n/g, ' ').trim();
             if (chatTitle.length > 35) {
                 chatTitle = chatTitle.substring(0, 32) + "...";
             }
             const fullTitle = `💬 "${chatTitle}"`;
-            const chatLabel = `Chat ${chatIndex + 1}`;
-
-            // Create a central Chat Session node
+            const chatLabel = `Session ${chatIndex + 1}`;
             const chatId = `chat_${cId}`;
+
             visualNodes.push({
                 id: chatId,
                 label: chatLabel,
                 type: "chat_session",
-                category: "Project", // Use Project category style (Neon Green)
+                category: "Session",
                 fullTitle: fullTitle
             });
 
-            // Add the Q&A nodes with chronological visual numbers Q1, Q2, Q3...
             group.forEach((n, index) => {
-                let category = "General";
-                const text = (n.question + " " + n.answer).toLowerCase();
-                if (n.tags.includes("preference") || text.includes("prefer") || text.includes("like") || text.includes("favorite")) {
-                    category = "Preference";
-                } else if (n.tags.includes("skill") || text.includes("code") || text.includes("write") || text.includes("python") || text.includes("javascript") || text.includes("rust")) {
-                    category = "Skill";
-                } else if (text.includes("name") || text.includes("allergic") || text.includes("allergy") || text.includes("live in")) {
-                    category = "Personal";
+                // Category is clean and context-driven (NO FAKE SKILLS REGEX!)
+                let category = "Discussion";
+                if (n.contextType === "decision" || n.tags.includes("decision") || n.tags.includes("rule")) {
+                    category = "Decision";
+                } else if (n.contextType === "code_change" || (n.filesTouched && n.filesTouched.length > 0)) {
+                    category = "Code";
                 }
 
-                // Simplified canvas label (e.g. Q1, Q2)
-                const label = `Q${index + 1}`;
+                const label = `S${index + 1}`;
 
                 visualNodes.push({
                     id: n.id,
@@ -221,13 +389,14 @@ export class MemoryDatabase {
                         timestamp: n.timestamp,
                         project: n.project,
                         fileRef: n.fileRef,
+                        filesTouched: n.filesTouched || [],
+                        contextType: n.contextType,
                         tags: n.tags,
                         conversationId: n.conversationId,
                         stepIndex: n.stepIndex
                     }
                 });
 
-                // Link each Q&A to the central Chat Session node to keep them clustered close in physics layout
                 visualLinks.push({
                     source: chatId,
                     target: n.id,
@@ -235,17 +404,29 @@ export class MemoryDatabase {
                 });
             });
 
-            // Create sequential chronological links Q1 -> Q2 -> Q3...
             for (let i = 0; i < group.length - 1; i++) {
                 visualLinks.push({
                     source: group[i].id,
                     target: group[i + 1].id,
-                    type: "next_question"
+                    type: "next_step"
                 });
             }
         });
 
-        return { nodes: visualNodes, links: visualLinks };
+        this.data.relationships.forEach(r => {
+            visualLinks.push({
+                source: r.source,
+                target: r.target,
+                type: r.type || "SIMILAR"
+            });
+        });
+
+        return {
+            nodes: visualNodes,
+            links: visualLinks,
+            invariants: this.data.invariants,
+            fileActions: this.data.fileActions
+        };
     }
 
     public exportDB(targetPath: string): boolean {
@@ -275,15 +456,84 @@ export class MemoryDatabase {
     }
 
     public deleteRecord(id: string) {
-        // Remove from nodes
         this.data.nodes = this.data.nodes.filter(n => n.id !== id);
-        // Remove associated relationships
         this.data.relationships = this.data.relationships.filter(r => r.source !== id && r.target !== id);
         this.save();
     }
 
+    public addRelationship(source: string, target: string, type: string = "SIMILAR") {
+        const exists = this.data.relationships.some(r => 
+            (r.source === source && r.target === target) ||
+            (r.source === target && r.target === source)
+        );
+        if (!exists) {
+            this.data.relationships.push({ source, target, type });
+            this.save();
+        }
+    }
+
+    public deleteRelationship(source: string, target: string) {
+        this.data.relationships = this.data.relationships.filter(r => 
+            !( (r.source === source && r.target === target) || (r.source === target && r.target === source) )
+        );
+        this.save();
+    }
+
+    public pruneForeignRecords(workspaceRoot?: string): { removedNodes: number; removedActions: number } {
+        if (!workspaceRoot) return { removedNodes: 0, removedActions: 0 };
+        const normRoot = workspaceRoot.replace(/\\/g, '/').toLowerCase();
+
+        const isInsideWorkspace = (p?: string) => {
+            if (!p) return false;
+            const normP = p.replace(/\\/g, '/').toLowerCase();
+            return normP.startsWith(normRoot) || (!normP.includes(':') && !normP.startsWith('/'));
+        };
+
+        const initialActionsCount = this.data.fileActions.length;
+        this.data.fileActions = this.data.fileActions.filter(fa => isInsideWorkspace(fa.filePath));
+        const removedActions = initialActionsCount - this.data.fileActions.length;
+
+        const initialNodesCount = this.data.nodes.length;
+        this.data.nodes = this.data.nodes.filter(n => {
+            if (n.fileRef && !isInsideWorkspace(n.fileRef)) {
+                return false;
+            }
+            if (n.filesTouched && n.filesTouched.length > 0) {
+                const anyInWorkspace = n.filesTouched.some(f => isInsideWorkspace(f));
+                if (!anyInWorkspace) return false;
+            }
+            return true;
+        });
+        const removedNodes = initialNodesCount - this.data.nodes.length;
+
+        // Clean orphaned relationships
+        const validNodeIds = new Set(this.data.nodes.map(n => n.id));
+        this.data.relationships = this.data.relationships.filter(
+            r => validNodeIds.has(r.source) && validNodeIds.has(r.target)
+        );
+
+        // Refresh indexedSteps
+        this.indexedSteps.clear();
+        this.data.nodes.forEach(n => {
+            if (n.conversationId && n.stepIndex !== undefined) {
+                this.indexedSteps.add(`${n.conversationId}_${n.stepIndex}`);
+            }
+            if (n.tags) {
+                n.tags.forEach(t => {
+                    if (t.includes('_')) this.indexedSteps.add(t);
+                });
+            }
+        });
+
+        if (removedNodes > 0 || removedActions > 0) {
+            this.save();
+        }
+        return { removedNodes, removedActions };
+    }
+
     public clearDB() {
-        this.data = { nodes: [], relationships: [] };
+        this.data = { nodes: [], relationships: [], invariants: [], fileActions: [] };
+        this.indexedSteps.clear();
         this.save();
     }
 }
