@@ -1,7 +1,7 @@
 {
     "name": "memlite-extension",
-    "displayName": "MemLite — Local AI Memory Hub",
-    "description": "Offline-first memory saver for your IDE chat. Captures questions/answers, creates a visual neural map, and passes context directly to your chat.",
+    "displayName": "MemLite — Local AI Memory & Context Recovery Hub",
+    "description": "Offline-first memory engine and tiered context recovery system for AI coding assistants.",
     "version": "2.0.0",
     "publisher": "memlite",
     "icon": "media/logo.png",
