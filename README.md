@@ -1,4 +1,4 @@
-# MemLite
+# MemLite - Local AI Memory & Context Recovery Hub
 
 [![Version](https://img.shields.io/badge/version-2.0.0-18181b.svg?style=flat-square)](https://github.com/Ritiky23/memlite)
 [![Open VSX](https://img.shields.io/badge/Open%20VSX-v2.0.0-18181b.svg?style=flat-square)](https://open-vsx.org/extension/memlite/memlite-extension)
