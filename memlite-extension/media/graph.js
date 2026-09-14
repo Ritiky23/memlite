@@ -54,7 +54,9 @@
 
     // DOM Elements - Context Cart Drawer
     const cartDrawer = document.getElementById('cart-drawer');
-    const cartCount = document.getElementById('cart-count');
+    const cartCountBadge = document.getElementById('cart-count-badge');
+    const cartHeaderTrigger = document.getElementById('cart-header-trigger');
+    const btnClearCart = document.getElementById('btn-clear-cart');
     const cartItemsList = document.getElementById('cart-items-list');
     const btnToggleCart = document.getElementById('btn-toggle-cart');
     const btnToggleCartDrawer = document.getElementById('btn-toggle-cart-drawer');
@@ -636,12 +638,19 @@
     // Context Cart Actions
     function updateCartUI() {
         const count = pinnedNodeIds.size;
-        cartCount.innerText = count;
-        pillCartCount.innerText = count;
+        if (cartCountBadge) {
+            cartCountBadge.innerText = count === 1 ? '1 item' : `${count} items`;
+            if (count > 0) {
+                cartCountBadge.classList.add('has-items');
+            } else {
+                cartCountBadge.classList.remove('has-items');
+            }
+        }
+        if (pillCartCount) pillCartCount.innerText = count;
         cartItemsList.innerHTML = '';
 
         if (count === 0) {
-            cartItemsList.innerHTML = '<li class="cart-item" style="color: #64748b; font-style: italic; border: none; background: transparent; justify-content: center;">No items in cart</li>';
+            cartItemsList.innerHTML = '<li class="cart-item-empty">No items staged in context cart. Pin items from the canvas or recovery deck.</li>';
             return;
         }
 
@@ -652,15 +661,22 @@
             const li = document.createElement('li');
             li.className = 'cart-item';
 
+            const badge = document.createElement('span');
+            badge.className = 'cart-item-badge';
+            badge.innerText = node.type === 'qa' ? 'QA' : 'Item';
+            li.appendChild(badge);
+
             const span = document.createElement('span');
             span.className = 'cart-item-text';
             const qTitle = (node.details && node.details.question) ? node.details.question : node.label;
             span.innerText = qTitle;
+            span.title = qTitle;
             li.appendChild(span);
 
             const removeBtn = document.createElement('button');
             removeBtn.className = 'cart-item-remove';
-            removeBtn.innerHTML = '&times;';
+            removeBtn.title = 'Remove item from cart';
+            removeBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
             removeBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 pinnedNodeIds.delete(id);
@@ -694,9 +710,30 @@
         renderBoard();
     });
 
-    btnToggleCart.addEventListener('click', () => {
+    btnToggleCart.addEventListener('click', (e) => {
+        e.stopPropagation();
         cartDrawer.classList.toggle('collapsed');
     });
+
+    if (cartHeaderTrigger) {
+        cartHeaderTrigger.addEventListener('click', (e) => {
+            if (e.target.closest('#btn-clear-cart') || e.target.closest('#btn-toggle-cart')) return;
+            cartDrawer.classList.toggle('collapsed');
+        });
+    }
+
+    if (btnClearCart) {
+        btnClearCart.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (pinnedNodeIds.size === 0) return;
+            pinnedNodeIds.clear();
+            updateCartUI();
+            draw();
+            renderTimeline();
+            renderBoard();
+            if (selectedNode) selectNode(selectedNode);
+        });
+    }
 
     btnToggleCartDrawer.addEventListener('click', () => {
         cartDrawer.classList.toggle('collapsed');

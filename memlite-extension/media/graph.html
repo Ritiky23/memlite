@@ -212,36 +212,53 @@
             </div>
         </aside>
 
-        <!-- Context Cart Drawer -->
-        <aside id="cart-drawer" class="glass-panel cart-panel collapsed">
-            <div class="cart-header">
+        <!-- Context Cart Drawer (Sleek Bottom Dock) -->
+        <aside id="cart-drawer" class="cart-panel collapsed">
+            <div class="cart-header" id="cart-header-trigger">
                 <div class="cart-title">
-                    <svg class="cart-title-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/>
-                        <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
-                    </svg>
-                    <span>Staged Context Cart (<span id="cart-count">0</span> items)</span>
+                    <div class="cart-title-icon-wrapper">
+                        <svg class="cart-title-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/>
+                            <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
+                        </svg>
+                    </div>
+                    <span class="cart-title-label">Staged Context Cart</span>
+                    <span id="cart-count-badge" class="cart-badge">0 items</span>
                 </div>
-                <button id="btn-toggle-cart" class="cart-toggle-btn">▲</button>
+                <div class="cart-header-actions">
+                    <button id="btn-clear-cart" class="cart-btn-ghost" title="Clear all staged items">Clear</button>
+                    <button id="btn-toggle-cart" class="cart-toggle-btn" title="Toggle Cart Drawer">
+                        <svg class="cart-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="18 15 12 9 6 15"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
             <div class="cart-body">
-                <ul id="cart-items-list" class="cart-list">
-                    <!-- Pinned items injected dynamically -->
-                </ul>
-                <div class="cart-actions">
-                    <button id="btn-sync-workspace" class="action-btn sync-btn">
-                        <svg class="btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                        </svg>
-                        <span>⚡ Rehydrate Agent (.memlite_context.md)</span>
-                    </button>
-                    <button id="btn-copy-cart" class="action-btn copy-btn">
-                        <svg class="btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                        </svg>
-                        <span>Copy Capsule</span>
-                    </button>
+                <div class="cart-items-container">
+                    <ul id="cart-items-list" class="cart-list">
+                        <!-- Pinned items injected dynamically -->
+                    </ul>
+                </div>
+                <div class="cart-footer">
+                    <div class="cart-footer-meta">
+                        <span class="cart-meta-hint">Context syncs directly into <code>.memlite_context.md</code></span>
+                    </div>
+                    <div class="cart-actions">
+                        <button id="btn-copy-cart" class="action-btn cart-action-secondary" title="Copy context capsule to clipboard">
+                            <svg class="btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            <span>Copy Capsule</span>
+                        </button>
+                        <button id="btn-sync-workspace" class="action-btn cart-action-primary" title="Write compiled context to workspace">
+                            <svg class="btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                            </svg>
+                            <span>Rehydrate Agent (.memlite_context.md)</span>
+                        </button>
+                    </div>
                 </div>
             </div>
         </aside>

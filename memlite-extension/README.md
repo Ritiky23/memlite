@@ -1,81 +1,88 @@
-# 🧠 MemLite: Local AI Memory Hub & Tiered Recovery Engine
+# MemLite
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://open-vsx.org/extension/memlite/memlite-extension)
-[![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](https://opensource.org/licenses/MIT)
-[![Privacy: Local-First](https://img.shields.io/badge/Privacy-100%25%20Local-green.svg)](#-privacy-first)
+[![Version](https://img.shields.io/badge/version-2.0.0-18181b.svg?style=flat-square)](https://open-vsx.org/extension/memlite/memlite-extension)
+[![License: MIT](https://img.shields.io/badge/license-MIT-18181b.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![Storage](https://img.shields.io/badge/storage-local--first-18181b.svg?style=flat-square)](#privacy--architecture)
 
-**Give your IDE AI assistant long-term memory and bulletproof context recovery.**
+Local memory engine and context recovery system for IDE chat assistants.
 
-MemLite is a local-first, private memory engine and visual dashboard for your IDE. It indexes conversations, tool executions, and file edits into an interactive neural mind map and generates **Tiered Agent Recovery Capsules** to instantly restore state across sessions without context rot.
+MemLite tracks conversations, file modifications, and agent executions locally in SQLite. It compiles structured **Tiered Context Recovery Capsules** to restore agent state across sessions without context drift or token waste.
 
-![MemLite Visual Mind Map and Context Cart](https://raw.githubusercontent.com/Ritiky23/memlite/main/memlite-extension/media/dashboard.png)
+![MemLite Visual Neural Map](https://raw.githubusercontent.com/Ritiky23/memlite/main/memlite-extension/media/memlite_ss1.png)
 
----
-
-## ⚡ What's New in v2.0
-
-* **🛡️ Tiered Agent Recovery Capsules:** Compile bulletproof prompt capsules categorized into Tier 0 (Invariants), Tier 1 (Causal File Provenance), and Tier 2 (Semantic Intent).
-* **🔍 AST Symbol Extraction:** Automatically parses modified classes, functions, and symbols on code diffs and file creations.
-* **⚡ Zero-Lag Architecture:** High-performance `O(1)` indexed step lookup, bounded transcript scanning, and lazy-rendered DOM pagination — zero IDE lag even with thousands of memories.
-* **🎯 Workspace Scoping & Isolation:** Multi-project isolation ensures your active project view only displays relevant memories and actions.
-* **🧼 One-Click Memory Pruning:** Clean up foreign or orphaned entries with the new Prune button.
+![MemLite Context Recovery Deck](https://raw.githubusercontent.com/Ritiky23/memlite/main/memlite-extension/media/memlite_ss2.png)
 
 ---
 
-## 🚀 Key Features
+## Overview
 
-### 1. ⚡ Tiered Context Recovery
-Recover crashed or compacted agent sessions with zero loss of critical context:
-* **🔒 Tier 0: Invariants & Constraints:** Enforces hard rules (forbidden libraries, API schemas, style constraints) with 100% fidelity.
-* **⚡ Tier 1: Causal File Provenance:** Tracks every file edit, creation, line delta, and modified symbol (`function`, `class`) with exact SHA-256 freshness validation.
-* **🧠 Tier 2: Semantic Intent:** Captures user goals, reasoning, and context summaries.
+During long programming sessions or agent compaction cycles, coding assistants lose crucial historical context—such as architectural constraints, recently modified symbols, and file provenance. MemLite solves this by maintaining an offline, chronological index of your workspace activity and synthesizing deterministic context capsules on demand.
 
-### 2. 🎨 Studio Visual Neural Map
-* **Collapsible Chat Hubs:** Visually clusters chat sessions. Click on any hub to expand or collapse chronological questions (`Q1` → `Q2` → `Q3`).
-* **Interactive Tooltips & Diff Viewer:** Hover over any node to inspect queries, answers, affected files, and line changes with full syntax highlighting.
-* **Chronological Timeline & Recovery Deck:** Switch seamlessly between the visual canvas, timeline view, and file provenance deck.
+### Highlights in v2.0
 
-### 3. 🛒 Multi-Select Context Cart
-* Pick and choose past Q&As and code changes across multiple sessions.
-* Automatically syncs to `.memlite_context.md` at your workspace root (auto-added to `.gitignore`).
-* Inject into Copilot, Claude, Gemini, or Codex by referencing `@.memlite_context.md` or dragging it directly into the chat prompt.
+- **Tiered Context Recovery**: Structured context compilation categorized into Invariants (Tier 0), Causal File Provenance (Tier 1), and Semantic Intent (Tier 2).
+- **AST Symbol Extraction**: Automatic detection of modified classes, functions, and symbols across file edits and creations.
+- **Sub-Millisecond Lookup**: `O(1)` indexed step retrieval, bounded log parsing, and lazy DOM rendering prevent UI stalls even with thousands of historical records.
+- **Workspace Scoping**: Strict project-level isolation ensures only relevant transcripts and edits appear in the active view.
 
 ---
 
-## 🛠️ Getting Started
+## Core Capabilities
+
+### Tiered Recovery Architecture
+
+1. **Tier 0 — Invariants & Constraints**  
+   Verbatim preservation of user guidelines, architectural contracts, and operational constraints that must never decay.
+
+2. **Tier 1 — Causal File Provenance**  
+   Deterministic record of every file change, line delta, and symbol touched by the assistant, backed by SHA-256 integrity checks.
+
+3. **Tier 2 — Semantic Intent**  
+   Synthesized summaries of user inquiries and agent reasoning steps for conversational continuity.
+
+### Visual Neural Map & Timeline
+
+- **Hierarchical Chat Hubs**: Collapsible session clusters that expand chronological questions (`Q1` → `Q2` → `Q3`).
+- **Diff & Symbol Viewer**: Inspect modified files, line counts, and AST symbols directly from the canvas or timeline.
+- **Context Cart**: Multi-select past Q&As and code changes, compiling them into `.memlite_context.md` at your workspace root for direct consumption by any chat model.
+
+---
+
+## Getting Started
 
 ### Installation
-1. Search for **MemLite** in the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`) and click **Install**.
-2. Or download the VSIX package from [Open VSX](https://open-vsx.org/extension/memlite/memlite-extension) or [GitHub Releases](https://github.com/Ritiky23/memlite/releases).
 
-### Launching the Dashboard
-* Click the **Brain icon (🧠)** in your IDE Activity Bar.
-* Or open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run:
-  ```text
-  MemLite: Show Visual Map
-  ```
+Install via the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`) by searching for **MemLite**, or download directly from [Open VSX](https://open-vsx.org/extension/memlite/memlite-extension).
+
+### Usage
+
+Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and execute:
+```text
+MemLite: Show Visual Map
+```
+Or select the MemLite icon in the Activity Bar.
 
 ---
 
-## ⌨️ Command Registry
+## Commands
 
 | Command | Description |
 | :--- | :--- |
-| `MemLite: Show Visual Map` | Opens the full-tab interactive neural mind map and recovery deck |
-| `MemLite: Export Memory` | Exports your local SQLite memory database as a JSON backup |
-| `MemLite: Import Memory` | Imports and merges external memories into your local storage |
-| `MemLite: Clear All Memory` | Safely clears stored conversations and file actions for the project |
+| `MemLite: Show Visual Map` | Opens the interactive visual map and recovery dashboard |
+| `MemLite: Export Memory` | Exports the local workspace memory database to JSON |
+| `MemLite: Import Memory` | Imports external records into local storage |
+| `MemLite: Clear All Memory` | Clears stored session data for the current workspace |
 
 ---
 
-## 🔒 Privacy First
+## Privacy & Architecture
 
-* **100% Offline & Local:** Everything runs locally on your machine.
-* **Zero Telemetry / Zero Cloud Calls:** Transcripts, embeddings, and diff summaries reside exclusively in your IDE's user storage directory.
-* **No Cloud Accounts Required:** No API keys or accounts needed to organize and browse your local memory.
+- **100% Offline**: All indexing, hashing, and symbol extraction runs locally.
+- **Zero Telemetry**: No network requests, external databases, or third-party analytics.
+- **Isolated Storage**: Transcripts and vector indexes remain strictly within your IDE's local storage directory.
 
 ---
 
-## 📄 License
+## License
 
 MIT © [Ritik Yadav](https://github.com/Ritiky23)
