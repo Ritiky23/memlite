@@ -2,6 +2,11 @@
 
 All notable changes to the **MemLite** extension are documented in this file.
 
+## [2.0.1] - 2026-09-14
+
+- **Documentation & Marketplace Sync**: Added comprehensive historical and architectural change logs.
+- **Context Cart UI Polish**: Polished bottom dock styling, category chips, and SVG indicators.
+
 ## [2.0.0] - 2026-09-14
 
 ### Major Release: Tiered Context Recovery & High-Performance Architecture
