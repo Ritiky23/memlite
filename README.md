@@ -1,23 +1,36 @@
-# 🧠 MemLite
+# 🧠 MemLite: Local AI Memory Hub & Context Recovery Engine
 
-Give your AI applications long-term memory in 5 lines. Local-first, private, and developer-friendly.
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/Ritiky23/memlite)
+[![Open VSX](https://img.shields.io/badge/Open%20VSX-v2.0.0-purple.svg)](https://open-vsx.org/extension/memlite/memlite-extension)
+[![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](#-license)
+[![Privacy: Local-First](https://img.shields.io/badge/Privacy-100%25%20Local-green.svg)](#-privacy-first)
 
-MemLite is a lightweight, local-first memory engine designed for LLM agents and assistants. It combines SQLite with full-text search (FTS5 BM25) and FAISS/NumPy for dense vector similarity search, enabling instant retention, hybrid retrieval, contradiction resolution, and intelligent decay of user memories.
+**Give your AI agents and IDE chat assistants persistent long-term memory and bulletproof context recovery.**
 
-It now includes an **MCP (Model Context Protocol) Server**, an **Async Engine**, a **Developer CLI**, and a **VS Code Extension** with a visual mind map.
+MemLite is a lightweight, local-first memory engine and visual dashboard. It combines SQLite (FTS5 BM25) and FAISS/FastEmbed for dense vector search, enabling instant retention, hybrid retrieval, contradiction resolution, and intelligent decay. It includes an **MCP Server**, an **Async Engine**, a **Developer CLI**, and a **VS Code / Open VSX Extension** with a visual neural map and **Tiered Agent Recovery Capsules**.
 
 ![MemLite Visual Mind Map and Context Cart](https://raw.githubusercontent.com/Ritiky23/memlite/main/memlite-extension/media/dashboard.png)
 
 ---
 
-## 🚀 Key Features
+## ⚡ What's New in v2.0
 
-- **Local-first & Private**: Runs 100% on your local machine using SQLite (with FTS5) and FAISS / FastEmbed. Zero mandatory cloud database setups.
+* **🛡️ Tiered Agent Recovery Capsules:** Generate structured prompt capsules divided into Tier 0 (Hard Invariants & Constraints), Tier 1 (Causal File Provenance with exact line diffs & symbol modifications), and Tier 2 (Semantic Intent & Goals).
+* **🔍 AST Symbol Extraction:** Automatically detects modified classes, functions, and symbols on code diffs and newly created files.
+* **⚡ Zero-Lag Architecture:** High-performance `O(1)` indexed step lookup, bounded transcript scanning, and lazy-rendered DOM pagination — zero IDE lag even with thousands of memories.
+* **🎯 Workspace Scoping & Isolation:** Multi-project isolation ensures your active project view only displays relevant memories and actions.
+* **🧼 One-Click Memory Pruning:** Clean up foreign or orphaned entries with the new Prune button.
+
+---
+
+## 🚀 Core Engine Features
+
+- **Local-first & Private**: Runs 100% locally on your machine using SQLite (with FTS5) and FAISS / FastEmbed. Zero cloud dependencies.
 - **True Hybrid Retrieval (BM25 + Dense Vector + RRF)**: Combines exact keyword matching with deep semantic similarity using Reciprocal Rank Fusion (RRF).
 - **Contradiction Resolution & Memory Superseding**: Detects conflicting or updated facts (e.g. *"I switched from dark mode to light mode"*) and supersedes older items automatically.
 - **Category-Aware Memory Decay**: Simulates human memory dynamics with custom decay rates for temporary notes vs. permanent personal facts and skills.
 - **Memory Consolidation & Reflection**: Synthesizes clusters of micro-memories into concise, coherent long-term profile summaries.
-- **Asynchronous Engine (`AsyncMemory`)**: Native `async`/`await` support (`aadd`, `asearch`, `aadd_batch`, `astats`) for high-performance agent frameworks (LangGraph, CrewAI, AutoGen, FastAPI).
+- **Asynchronous Engine (`AsyncMemory`)**: Native `async`/`await` support (`aadd`, `asearch`, `aadd_batch`, `astats`) for agent frameworks (LangGraph, CrewAI, AutoGen, FastAPI).
 - **Model Context Protocol (MCP) Server**: Connect MemLite directly to Claude Desktop, Cursor, Antigravity, and other MCP clients via `memlite mcp`.
 - **FastEmbed ONNX Support**: Ultra-lightweight local embeddings without requiring heavy PyTorch installations.
 - **Developer CLI**: Fast terminal commands for managing memories, viewing stats, and inspecting retrieval ranking diagnostics.
@@ -150,16 +163,26 @@ memlite cleanup
 
 ---
 
-## 🖥️ VS Code Extension Features
+## 🖥️ IDE Extension (VS Code & Open VSX)
 
-- **Collapsible Mind Map:** Clusters previous chat sessions visually.
-- **Interactive Hover Tooltips:** Sweep over nodes to instantly preview questions.
-- **Context Cart:** Select and pin multiple memories/code changes across chat threads.
-- **Workspace Markdown Sync:** Writes compiled context to `.memlite_context.md` at your workspace root, ready to be referenced in Copilot/Codex/Gemini via `#file:.memlite_context.md`.
+The **MemLite Extension** provides a rich visual dashboard and agent recovery cockpit directly in your editor:
+
+* **Collapsible Neural Mind Map:** Clusters previous chat sessions visually. Click hubs to expand/collapse chronological Q&As.
+* **Tiered Context Recovery Deck:** One-click generation of Tier 0/1/2 prompt recovery capsules.
+* **Context Cart:** Multi-select past Q&As and code changes across sessions.
+* **Workspace Markdown Sync:** Automatically compiles context into `.memlite_context.md` at your workspace root, ready to be injected into Copilot, Claude, Gemini, or Codex via `#file:.memlite_context.md`.
+
+Install directly from [Open VSX](https://open-vsx.org/extension/memlite/memlite-extension) or the VS Code Marketplace.
+
+---
+
+## 🔒 Privacy First
+
+* Everything runs 100% locally on your machine.
+* Your chat transcripts, code diffs, and embedding vectors are kept entirely private inside your local database. Zero telemetry, zero external network calls.
 
 ---
 
 ## 📄 License
 
-MIT License
-
+MIT © [Ritik Yadav](https://github.com/Ritiky23)
