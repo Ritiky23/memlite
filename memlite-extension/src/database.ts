@@ -105,7 +105,7 @@ export class MemoryDatabase {
         }
     }
 
-    public addRecord(
+    public upsertRecord(
         question: string,
         answer: string,
         project: string,
@@ -115,14 +115,13 @@ export class MemoryDatabase {
         stepIndex?: number,
         filesTouched?: string[],
         contextType?: "decision" | "code_change" | "milestone" | "discussion"
-    ): MemoryNode {
-        const id = crypto.randomUUID();
+    ): { node: MemoryNode; isNew: boolean; isUpdated: boolean } {
         const extractedTags = this.extractTags(question + " " + answer);
         const uniqueTags = Array.from(new Set([...manualTags, ...extractedTags]))
             .map(t => t.toLowerCase())
             .filter(t => t.length > 2 && !this.isStopword(t));
 
-        // Determine context type cleanly without naive regex
+        // Determine context type cleanly
         if (!contextType) {
             if (filesTouched && filesTouched.length > 0) {
                 contextType = "code_change";
@@ -133,6 +132,39 @@ export class MemoryDatabase {
             }
         }
 
+        const stepKey = (conversationId && stepIndex !== undefined) ? `${conversationId}_${stepIndex}` : null;
+        
+        let existingNode: MemoryNode | undefined;
+        if (stepKey) {
+            existingNode = this.data.nodes.find(n => 
+                (n.conversationId === conversationId && n.stepIndex === stepIndex) ||
+                (n.tags && n.tags.includes(stepKey))
+            );
+        }
+
+        if (existingNode) {
+            const currentFiles = (existingNode.filesTouched || []).slice().sort().join(',');
+            const newFiles = (filesTouched || []).slice().sort().join(',');
+            const isChanged = existingNode.answer !== answer || 
+                              existingNode.question !== question ||
+                              currentFiles !== newFiles;
+            
+            if (isChanged) {
+                existingNode.question = question;
+                existingNode.answer = answer;
+                existingNode.timestamp = new Date().toISOString();
+                existingNode.project = project || existingNode.project || "Default Project";
+                if (fileRef) existingNode.fileRef = fileRef;
+                existingNode.filesTouched = Array.from(new Set([...(existingNode.filesTouched || []), ...(filesTouched || [])]));
+                existingNode.contextType = contextType;
+                existingNode.tags = Array.from(new Set([...existingNode.tags, ...uniqueTags]));
+                this.save();
+                return { node: existingNode, isNew: false, isUpdated: true };
+            }
+            return { node: existingNode, isNew: false, isUpdated: false };
+        }
+
+        const id = crypto.randomUUID();
         const newNode: MemoryNode = {
             id,
             question,
@@ -148,15 +180,39 @@ export class MemoryDatabase {
         };
 
         this.data.nodes.push(newNode);
-        if (conversationId && stepIndex !== undefined) {
-            this.indexedSteps.add(`${conversationId}_${stepIndex}`);
+        if (stepKey) {
+            this.indexedSteps.add(stepKey);
         }
         manualTags.forEach(t => {
             if (t.includes('_')) this.indexedSteps.add(t);
         });
         this.createAutoRelationships(newNode);
         this.save();
-        return newNode;
+        return { node: newNode, isNew: true, isUpdated: false };
+    }
+
+    public addRecord(
+        question: string,
+        answer: string,
+        project: string,
+        fileRef?: string,
+        manualTags: string[] = [],
+        conversationId?: string,
+        stepIndex?: number,
+        filesTouched?: string[],
+        contextType?: "decision" | "code_change" | "milestone" | "discussion"
+    ): MemoryNode {
+        return this.upsertRecord(
+            question,
+            answer,
+            project,
+            fileRef,
+            manualTags,
+            conversationId,
+            stepIndex,
+            filesTouched,
+            contextType
+        ).node;
     }
 
     public hasStep(stepKey: string): boolean {
@@ -212,7 +268,12 @@ export class MemoryDatabase {
 
     // --- File Provenance (Tier 1 & 2) Methods ---
     public recordFileAction(actionItem: FileActionItem) {
-        this.data.fileActions.push(actionItem);
+        const existingIdx = this.data.fileActions.findIndex(fa => fa.id === actionItem.id);
+        if (existingIdx !== -1) {
+            this.data.fileActions[existingIdx] = actionItem;
+        } else {
+            this.data.fileActions.push(actionItem);
+        }
         this.save();
     }
 

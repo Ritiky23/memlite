@@ -100,7 +100,7 @@ export class TranscriptWatcher {
             const lines = content.split('\n').filter(l => l.trim().length > 0);
 
             const lastIndex = this.processedLogs.get(filePath) || 0;
-            if (lines.length <= lastIndex) return false;
+            if (lines.length <= lastIndex && this.processedLogs.has(filePath)) return false;
 
             // Extract conversation ID from path
             const parts = filePath.split(path.sep);
@@ -109,66 +109,91 @@ export class TranscriptWatcher {
                 ? parts[brainIndex + 1]
                 : path.basename(path.dirname(path.dirname(filePath)));
 
-            let currentQuestion: string | null = null;
-            let currentStepIndex: number = 0;
+            // Aggregate transcript lines into complete conversation turns
+            interface ConversationTurn {
+                stepIndex: number;
+                question: string;
+                textResponses: string[];
+                toolCalls: any[];
+            }
 
-            lines.slice(lastIndex).forEach((line) => {
+            const turns: ConversationTurn[] = [];
+            let currentTurn: ConversationTurn | null = null;
+
+            for (const line of lines) {
                 try {
                     const logObj = JSON.parse(line);
                     
                     if (logObj.type === 'USER_INPUT' && logObj.content) {
-                        currentQuestion = this.cleanPrompt(logObj.content);
-                        currentStepIndex = logObj.step_index;
-                    } 
-                    else if (logObj.type === 'PLANNER_RESPONSE' && currentQuestion) {
-                        const rawAnswer = logObj.content || '';
-                        let answer = this.cleanAnswer(rawAnswer);
-                        
-                        // Extract tools, file modifications, and diff breadcrumbs
-                        const toolInfo = this.extractToolContextAndActions(
-                            logObj.tool_calls,
-                            currentQuestion,
-                            currentStepIndex
-                        );
-
-                        if (toolInfo.summary) {
-                            answer += toolInfo.summary;
+                        const cleanedQuestion = this.cleanPrompt(logObj.content);
+                        if (this.isMemoryWorthy(cleanedQuestion)) {
+                            currentTurn = {
+                                stepIndex: logObj.step_index ?? 0,
+                                question: cleanedQuestion,
+                                textResponses: [],
+                                toolCalls: []
+                            };
+                            turns.push(currentTurn);
+                        } else {
+                            currentTurn = null;
                         }
-                        
-                        // Only save if the answer has actual content (skip intermediate tool-run steps)
-                        if (answer.trim().length > 0) {
-                            const stepKey = `${conversationId}_${currentStepIndex}`;
-                            // Fast O(1) step lookup: never run getGraphData() in a loop!
-                            if (!this.db.hasStep(stepKey) && this.isMemoryWorthy(currentQuestion)) {
-                                const activeEditor = vscode.window.activeTextEditor;
-                                const fileRef = activeEditor ? activeEditor.document.fileName : undefined;
-                                const project = vscode.workspace.name || "Default Project";
-
-                                console.log(`Watcher: Indexing step ${currentStepIndex} from conversation ${conversationId}`);
-                                
-                                this.db.addRecord(
-                                    currentQuestion,
-                                    answer,
-                                    project,
-                                    fileRef,
-                                    [stepKey, "auto-log"],
-                                    conversationId,
-                                    currentStepIndex,
-                                    toolInfo.filesTouched,
-                                    toolInfo.filesTouched.length > 0 ? "code_change" : "discussion"
-                                );
-                                
-                                addedAny = true;
+                    } 
+                    else if (currentTurn && logObj.type === 'PLANNER_RESPONSE') {
+                        if (logObj.content) {
+                            const cleaned = this.cleanAnswer(logObj.content);
+                            if (cleaned.length > 0) {
+                                currentTurn.textResponses.push(cleaned);
                             }
-                            
-                            // Reset pair
-                            currentQuestion = null;
+                        }
+                        if (logObj.tool_calls && Array.isArray(logObj.tool_calls) && logObj.tool_calls.length > 0) {
+                            currentTurn.toolCalls.push(...logObj.tool_calls);
                         }
                     }
                 } catch (err) {
                     // Ignore transient malformed line
                 }
-            });
+            }
+
+            // Process every turn and record/update into database
+            for (const turn of turns) {
+                const toolInfo = this.extractToolContextAndActions(
+                    turn.toolCalls,
+                    turn.question,
+                    turn.stepIndex
+                );
+
+                const mainAnswer = turn.textResponses.join('\n\n').trim();
+                let fullAnswer = mainAnswer;
+                if (toolInfo.summary) {
+                    fullAnswer = fullAnswer ? `${fullAnswer}${toolInfo.summary}` : toolInfo.summary.trim();
+                }
+
+                if (fullAnswer.trim().length === 0) {
+                    continue;
+                }
+
+                const stepKey = `${conversationId}_${turn.stepIndex}`;
+                const activeEditor = vscode.window.activeTextEditor;
+                const fileRef = activeEditor ? activeEditor.document.fileName : undefined;
+                const project = vscode.workspace.name || "Default Project";
+
+                const result = this.db.upsertRecord(
+                    turn.question,
+                    fullAnswer,
+                    project,
+                    fileRef,
+                    [stepKey, "auto-log"],
+                    conversationId,
+                    turn.stepIndex,
+                    toolInfo.filesTouched,
+                    toolInfo.filesTouched.length > 0 ? "code_change" : "discussion"
+                );
+
+                if (result.isNew || result.isUpdated) {
+                    console.log(`Watcher: ${result.isNew ? 'Indexed' : 'Updated'} step ${turn.stepIndex} from conversation ${conversationId} (${toolInfo.filesTouched.length} files touched)`);
+                    addedAny = true;
+                }
+            }
 
             this.processedLogs.set(filePath, lines.length);
             if (addedAny && triggerRefresh) {
@@ -249,9 +274,23 @@ export class TranscriptWatcher {
     private isInsideWorkspace(targetPath: string): boolean {
         if (!targetPath) return false;
         if (!this.workspaceRoot) return true;
-        const normRoot = this.workspaceRoot.replace(/\\/g, '/').toLowerCase();
+        const normRoot = this.workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
         const normTarget = targetPath.replace(/\\/g, '/').toLowerCase();
-        return normTarget.startsWith(normRoot) || (!normTarget.includes(':') && !normTarget.startsWith('/'));
+        return normTarget.startsWith(normRoot + '/') || 
+               normTarget === normRoot || 
+               (!normTarget.includes(':') && !normTarget.startsWith('/'));
+    }
+
+    private getRelativePath(targetPath: string): string {
+        if (!targetPath) return '';
+        const normTarget = targetPath.replace(/\\/g, '/');
+        if (this.workspaceRoot) {
+            const normRoot = this.workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+            if (normTarget.toLowerCase().startsWith(normRoot.toLowerCase() + '/')) {
+                return normTarget.substring(normRoot.length + 1);
+            }
+        }
+        return path.basename(normTarget);
     }
 
     private extractToolContextAndActions(
@@ -267,24 +306,23 @@ export class TranscriptWatcher {
         let hasActions = false;
         const filesTouchedSet = new Set<string>();
 
-        toolCalls.forEach((tc: any) => {
+        toolCalls.forEach((tc: any, actionIdx: number) => {
             const name = tc.name || '';
             const args = tc.args || {};
             
-            if (name === 'write_to_file') {
-                const rawFile = this.cleanArg(args.TargetFile || '');
+            if (name === 'write_to_file' || name === 'create_file') {
+                const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
                 if (rawFile && this.isInsideWorkspace(rawFile)) {
                     hasActions = true;
-                    const file = path.basename(rawFile);
-                    const code = this.cleanArg(args.CodeContent || '');
-                    const relFile = rawFile.replace(/\\/g, '/');
+                    const relFile = this.getRelativePath(rawFile);
+                    const code = this.cleanArg(args.CodeContent || args.content || args.file_text || '');
                     filesTouchedSet.add(relFile);
 
                     const { summary: diffSummary, added, removed } = this.generateDiffSummary(code, 20, true);
                     const fileHash = this.computeHash(code);
 
                     this.db.recordFileAction({
-                        id: `${stepIndex}_${this.computeHash(relFile)}`,
+                        id: `${stepIndex}_${actionIdx}_${this.computeHash(relFile)}`,
                         stepIndex,
                         filePath: relFile,
                         action: 'created',
@@ -296,22 +334,21 @@ export class TranscriptWatcher {
                         timestamp: new Date().toISOString()
                     });
 
-                    summary += `\n\n📄 **Created File:** \`${file}\` (SHA: \`${fileHash}\`)\n\`\`\`\n${code.substring(0, 500)}${code.length > 500 ? '\n... (truncated)' : ''}\n\`\`\``;
+                    summary += `\n\n📄 **Created File:** \`${relFile}\` (SHA: \`${fileHash}\`)\n\`\`\`\n${code.substring(0, 500)}${code.length > 500 ? '\n... (truncated)' : ''}\n\`\`\``;
                 }
-            } else if (name === 'replace_file_content') {
-                const rawFile = this.cleanArg(args.TargetFile || '');
+            } else if (name === 'replace_file_content' || name === 'edit_file' || name === 'apply_diff' || name === 'apply_patch') {
+                const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
                 if (rawFile && this.isInsideWorkspace(rawFile)) {
                     hasActions = true;
-                    const file = path.basename(rawFile);
-                    const rep = this.cleanArg(args.ReplacementContent || '');
-                    const relFile = rawFile.replace(/\\/g, '/');
+                    const relFile = this.getRelativePath(rawFile);
+                    const rep = this.cleanArg(args.ReplacementContent || args.replacement || args.content || '');
                     filesTouchedSet.add(relFile);
 
                     const { summary: diffSummary, added, removed } = this.generateDiffSummary(rep);
                     const fileHash = this.computeHash(rep);
 
                     this.db.recordFileAction({
-                        id: `${stepIndex}_${this.computeHash(relFile)}`,
+                        id: `${stepIndex}_${actionIdx}_${this.computeHash(relFile)}`,
                         stepIndex,
                         filePath: relFile,
                         action: 'modified',
@@ -324,31 +361,49 @@ export class TranscriptWatcher {
                     });
 
                     if (diffSummary.startsWith('[LARGE DIFF')) {
-                        summary += `\n\n✏️ **Modified File:** \`${file}\`\n${diffSummary}`;
+                        summary += `\n\n✏️ **Modified File:** \`${relFile}\`\n${diffSummary}`;
                     } else {
-                        summary += `\n\n✏️ **Modified File:** \`${file}\`\n\`\`\`diff\n${rep.substring(0, 500)}${rep.length > 500 ? '\n... (truncated)' : ''}\n\`\`\``;
+                        summary += `\n\n✏️ **Modified File:** \`${relFile}\`\n\`\`\`diff\n${rep.substring(0, 500)}${rep.length > 500 ? '\n... (truncated)' : ''}\n\`\`\``;
                     }
                 }
             } else if (name === 'multi_replace_file_content') {
-                const rawFile = this.cleanArg(args.TargetFile || '');
+                const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
                 if (rawFile && this.isInsideWorkspace(rawFile)) {
                     hasActions = true;
-                    const file = path.basename(rawFile);
-                    const relFile = rawFile.replace(/\\/g, '/');
+                    const relFile = this.getRelativePath(rawFile);
                     filesTouchedSet.add(relFile);
 
-                    summary += `\n\n✏️ **Multi-line Edit in File:** \`${file}\``;
+                    summary += `\n\n✏️ **Multi-line Edit in File:** \`${relFile}\``;
+                    let totalAdded = 0;
+                    let totalRemoved = 0;
+                    let combinedRep = '';
                     if (args.ReplacementChunks && Array.isArray(args.ReplacementChunks)) {
                         args.ReplacementChunks.forEach((chunk: any, i: number) => {
                             const rep = this.cleanArg(chunk.ReplacementContent || '');
-                            const { summary: diffSummary } = this.generateDiffSummary(rep);
+                            combinedRep += rep + '\n';
+                            const { summary: diffSummary, added, removed } = this.generateDiffSummary(rep);
+                            totalAdded += added;
+                            totalRemoved += removed;
                             summary += `\n* **Chunk ${i+1}:** ${diffSummary}`;
                         });
                     }
+                    const fileHash = this.computeHash(combinedRep);
+                    this.db.recordFileAction({
+                        id: `${stepIndex}_${actionIdx}_${this.computeHash(relFile)}`,
+                        stepIndex,
+                        filePath: relFile,
+                        action: 'modified',
+                        fileHashAfter: fileHash,
+                        intent: currentQuestion,
+                        diffSummary: `Multi-line edit across ${args.ReplacementChunks?.length || 1} chunks`,
+                        linesAdded: totalAdded,
+                        linesRemoved: totalRemoved,
+                        timestamp: new Date().toISOString()
+                    });
                 }
-            } else if (name === 'run_command') {
+            } else if (name === 'run_command' || name === 'execute_command' || name === 'run_shell_command') {
                 hasActions = true;
-                const cmd = this.cleanArg(args.CommandLine || '');
+                const cmd = this.cleanArg(args.CommandLine || args.command || '');
                 summary += `\n\n💻 **Executed Command:** \`${cmd}\``;
             }
         });
@@ -365,13 +420,13 @@ export class TranscriptWatcher {
             return requestMatch[1].trim();
         }
         let cleaned = rawPrompt.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '');
-        cleaned = cleaned.replace(/<[^>]*>/g, '');
+        cleaned = cleaned.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, '');
+        cleaned = cleaned.replace(/<conversation_summaries>[\s\S]*?<\/conversation_summaries>/g, '');
         return cleaned.trim();
     }
 
     private cleanAnswer(rawAnswer: string): string {
         let cleaned = rawAnswer.replace(/<thinking>[\s\S]*?<\/thinking>/g, '');
-        cleaned = cleaned.replace(/<[^>]*>/g, '');
         return cleaned.trim();
     }
 
