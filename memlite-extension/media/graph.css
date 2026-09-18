@@ -697,6 +697,34 @@ html, body {
     line-height: 1.45;
 }
 
+.file-chips-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    color: #6ee7b7;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: var(--vscode-editor-font-family, monospace);
+    word-break: break-all;
+    transition: all 0.15s ease;
+}
+
+.file-chip:hover {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: rgba(16, 185, 129, 0.45);
+    color: #a7f3d0;
+}
+
 .panel-footer {
     padding: 10px 14px;
     border-top: 1px solid rgba(255, 255, 255, 0.07);

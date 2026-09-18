@@ -2,6 +2,20 @@
 
 All notable changes to the **MemLite** extension are documented in this file.
 
+## [2.0.3] - 2026-09-18
+
+- **Latest-First Session & Timeline Ordering**: Session Threads, Timeline Stream, and Recovery Deck columns now present the newest sessions and latest conversation steps at the top for instant accessibility.
+- **Referenced & Modified Files Chips**: Fixed empty file drawer display by combining structured `filesTouched` with automatic regex backfilling from historical responses, rendering clean file badges with icons and tooltips.
+- **Dynamic File Chip Drawer**: Automatically hides or displays file sections depending on file context availability.
+
+## [2.0.2] - 2026-09-18
+
+- **Full Multi-File Turn Aggregation**: Aggregates all file modifications, creations, multi-chunk diffs, and executed commands across all intermediate steps within a turn into consolidated memories.
+- **Direct AI Chatbox Staging**: Clicking *Rehydrate Agent* or *Pass Context* now automatically stages and pre-fills the prompt into the active Copilot/Gemini chat input box.
+- **Context Loop Prevention**: Automatically strips injected context blocks (`--- MEMLITE CONTEXT ---`, `Selected Reference Q&A`, and recovery capsules) from user requests to prevent recursive prompt pollution.
+- **Cross-Platform Home Directory Resolution**: Uses `os.homedir()` for reliable brain directory lookup across Windows, macOS, and Linux.
+- **Path-Normalized File Freshness Verification**: Normalizes file path keys with case-insensitivity to prevent false-positive stale alerts on Windows.
+
 ## [2.0.1] - 2026-09-14
 
 - **Documentation & Marketplace Sync**: Added comprehensive historical and architectural change logs.

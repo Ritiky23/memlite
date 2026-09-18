@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { MemoryDatabase, FileActionItem } from './database';
@@ -14,7 +15,7 @@ export class TranscriptWatcher {
     constructor(db: MemoryDatabase, workspaceRoot?: string) {
         this.db = db;
         this.workspaceRoot = workspaceRoot;
-        const homeDir = process.env.USERPROFILE || process.env.HOME || 'C:\\Users\\lenovo';
+        const homeDir = os.homedir() || process.env.USERPROFILE || process.env.HOME || '';
         this.brainPath = path.join(homeDir, '.gemini', 'antigravity-ide', 'brain');
     }
 
@@ -415,14 +416,24 @@ export class TranscriptWatcher {
     }
 
     private cleanPrompt(rawPrompt: string): string {
+        let text = rawPrompt;
         const requestMatch = rawPrompt.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
         if (requestMatch) {
-            return requestMatch[1].trim();
+            text = requestMatch[1];
+        } else {
+            text = text.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '');
+            text = text.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, '');
+            text = text.replace(/<conversation_summaries>[\s\S]*?<\/conversation_summaries>/g, '');
         }
-        let cleaned = rawPrompt.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '');
-        cleaned = cleaned.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, '');
-        cleaned = cleaned.replace(/<conversation_summaries>[\s\S]*?<\/conversation_summaries>/g, '');
-        return cleaned.trim();
+
+        // Strip injected MemLite context blocks to prevent recursive context loop pollution
+        text = text.replace(/--- MEMLITE CONTEXT ---[\s\S]*?-----------------------/g, '');
+        text = text.replace(/Related Past Conversations(?: & Files)?:[\s\S]*?-----------------------/g, '');
+        text = text.replace(/Selected Reference Q&A:[\s\S]*?-----------------------/g, '');
+        text = text.replace(/# 🧠 MemLite: Compiled Chat Context Reference[\s\S]*?(?:---\s*\n*|$)/g, '');
+        text = text.replace(/# ⚡ MEMLITE AGENT RECOVERY CAPSULE[\s\S]*?(?:---\s*\n*|$)/g, '');
+
+        return text.trim();
     }
 
     private cleanAnswer(rawAnswer: string): string {

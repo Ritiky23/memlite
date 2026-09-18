@@ -103,10 +103,8 @@ export function activate(context: vscode.ExtensionContext) {
                         }
                         break;
                     case 'passContext':
-                        // Leverage same logic (copies to clipboard, shows notification)
                         const promptContext = compileContextBlock(message.text, message.answer, message.connected);
-                        await vscode.env.clipboard.writeText(promptContext);
-                        vscode.window.showInformationMessage("🧠 MemLite: Copied context to clipboard!");
+                        await stageContextToChat(promptContext, "🧠 MemLite");
                         break;
                     case 'copyClipboard':
                         await vscode.env.clipboard.writeText(message.text);
@@ -133,10 +131,9 @@ export function activate(context: vscode.ExtensionContext) {
                         const contextPath = path.join(root, '.memlite_context.md');
                         try {
                             fs.writeFileSync(contextPath, capsule, 'utf8');
-                            await vscode.env.clipboard.writeText(capsule);
                             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(contextPath));
                             await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, false);
-                            vscode.window.showInformationMessage("⚡ MemLite: Agent Rehydration Capsule generated & copied to clipboard!");
+                            await stageContextToChat(capsule, "⚡ MemLite");
                         } catch (e) {
                             vscode.window.showErrorMessage(`MemLite: Failed to write context capsule: ${e}`);
                         }
@@ -302,6 +299,35 @@ async function handleExportContextFile(items: any[]) {
         vscode.window.showInformationMessage("🧠 MemLite: Workspace `.memlite_context.md` successfully updated!");
     } catch (e) {
         vscode.window.showErrorMessage(`MemLite: Failed to write context file: ${e}`);
+    }
+}
+
+export async function stageContextToChat(contextText: string, notificationPrefix: string = "🧠 MemLite") {
+    // 1. Always write to clipboard for instant Ctrl+V / Cmd+V
+    await vscode.env.clipboard.writeText(contextText);
+
+    let stagedDirectly = false;
+    try {
+        // Try opening VS Code / Copilot / Gemini chat view with query staged
+        await vscode.commands.executeCommand('workbench.action.chat.open', { query: contextText });
+        stagedDirectly = true;
+    } catch (e1) {
+        try {
+            await vscode.commands.executeCommand('workbench.action.quickchat.open', { query: contextText });
+            stagedDirectly = true;
+        } catch (e2) {
+            // Fallback: clipboard ready
+        }
+    }
+
+    if (stagedDirectly) {
+        vscode.window.showInformationMessage(
+            `${notificationPrefix}: Staged context directly to AI Chatbox & copied to clipboard!`
+        );
+    } else {
+        vscode.window.showInformationMessage(
+            `${notificationPrefix}: Context copied to clipboard! Paste (Ctrl+V) directly into your AI chat.`
+        );
     }
 }
 

@@ -281,24 +281,30 @@ export class MemoryDatabase {
         const stale: { file: string; warning: string }[] = [];
         let freshCount = 0;
 
-        // Group by file path to get latest recorded hash
-        const latestByFile: { [path: string]: FileActionItem } = {};
+        // Group by normalized file path to get latest recorded hash
+        const latestByFile: { [normKey: string]: { originalPath: string; action: FileActionItem } } = {};
         this.data.fileActions.forEach(fa => {
-            latestByFile[fa.filePath] = fa;
+            const normKey = fa.filePath.replace(/\\/g, '/').toLowerCase();
+            latestByFile[normKey] = { originalPath: fa.filePath, action: fa };
         });
 
-        Object.keys(latestByFile).forEach(relPath => {
-            const absPath = path.isAbsolute(relPath) ? relPath : path.join(workspaceRoot, relPath);
+        Object.keys(latestByFile).forEach(normKey => {
+            const { originalPath, action } = latestByFile[normKey];
+            const cleanRelPath = originalPath.replace(/\\/g, '/');
+            const absPath = path.isAbsolute(originalPath) 
+                ? originalPath 
+                : path.join(workspaceRoot, originalPath);
+
             if (!fs.existsSync(absPath)) {
-                stale.push({ file: relPath, warning: `⚠️ MISSING: '${relPath}' deleted on disk.` });
+                stale.push({ file: cleanRelPath, warning: `⚠️ MISSING: '${cleanRelPath}' deleted on disk.` });
                 return;
             }
             try {
                 const rawContent = fs.readFileSync(absPath, 'utf8');
                 const normalized = rawContent.replace(/\r\n/g, '\n').trim();
                 const currentHash = crypto.createHash('sha256').update(normalized, 'utf8').digest('hex').substring(0, 16);
-                if (currentHash !== latestByFile[relPath].fileHashAfter) {
-                    stale.push({ file: relPath, warning: `⚠️ STALE: '${relPath}' modified on disk since step ${latestByFile[relPath].stepIndex}.` });
+                if (currentHash !== action.fileHashAfter) {
+                    stale.push({ file: cleanRelPath, warning: `⚠️ STALE: '${cleanRelPath}' modified on disk since step ${action.stepIndex}.` });
                 } else {
                     freshCount++;
                 }
@@ -406,7 +412,16 @@ export class MemoryDatabase {
             convGroups[cId].push(n);
         });
 
-        Object.keys(convGroups).forEach((cId, chatIndex) => {
+        // Sort conversations by latest activity/timestamp descending (newest on top)
+        const sortedConvIds = Object.keys(convGroups).sort((a, b) => {
+            const nodesA = convGroups[a];
+            const nodesB = convGroups[b];
+            const timeA = nodesA.reduce((max, n) => (n.timestamp && n.timestamp > max) ? n.timestamp : max, '');
+            const timeB = nodesB.reduce((max, n) => (n.timestamp && n.timestamp > max) ? n.timestamp : max, '');
+            return timeB.localeCompare(timeA);
+        });
+
+        sortedConvIds.forEach((cId, chatIndex) => {
             const group = convGroups[cId];
             group.sort((a, b) => (a.stepIndex ?? 0) - (b.stepIndex ?? 0));
             if (group.length === 0) return;
@@ -417,7 +432,7 @@ export class MemoryDatabase {
                 chatTitle = chatTitle.substring(0, 32) + "...";
             }
             const fullTitle = `💬 "${chatTitle}"`;
-            const chatLabel = `Session ${chatIndex + 1}`;
+            const chatLabel = `Session ${sortedConvIds.length - chatIndex}`;
             const chatId = `chat_${cId}`;
 
             visualNodes.push({
@@ -429,11 +444,33 @@ export class MemoryDatabase {
             });
 
             group.forEach((n, index) => {
-                // Category is clean and context-driven (NO FAKE SKILLS REGEX!)
+                // Extract files from answer if filesTouched is empty (backfill for older sessions)
+                const extractedFilesFromAnswer: string[] = [];
+                if (n.answer) {
+                    const linkMatches = n.answer.matchAll(/\[([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)\]\(file:\/\/\/[^)]*\)/g);
+                    for (const m of linkMatches) {
+                        extractedFilesFromAnswer.push(m[1]);
+                    }
+                    const codeActionMatches = n.answer.matchAll(/\*\*(?:Modified|Created) File:\*\*\s*`([^`]+)`/g);
+                    for (const m of codeActionMatches) {
+                        extractedFilesFromAnswer.push(m[1]);
+                    }
+                    const multiEditMatches = n.answer.matchAll(/\*\*Multi-line Edit in File:\*\*\s*`([^`]+)`/g);
+                    for (const m of multiEditMatches) {
+                        extractedFilesFromAnswer.push(m[1]);
+                    }
+                }
+
+                const combinedFilesTouched = Array.from(new Set([
+                    ...(n.filesTouched || []),
+                    ...extractedFilesFromAnswer
+                ]));
+
+                // Category is clean and context-driven
                 let category = "Discussion";
                 if (n.contextType === "decision" || n.tags.includes("decision") || n.tags.includes("rule")) {
                     category = "Decision";
-                } else if (n.contextType === "code_change" || (n.filesTouched && n.filesTouched.length > 0)) {
+                } else if (n.contextType === "code_change" || combinedFilesTouched.length > 0) {
                     category = "Code";
                 }
 
@@ -450,7 +487,7 @@ export class MemoryDatabase {
                         timestamp: n.timestamp,
                         project: n.project,
                         fileRef: n.fileRef,
-                        filesTouched: n.filesTouched || [],
+                        filesTouched: combinedFilesTouched,
                         contextType: n.contextType,
                         tags: n.tags,
                         conversationId: n.conversationId,

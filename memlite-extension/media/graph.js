@@ -597,7 +597,27 @@
             nodeBadge.className = 'badge qa';
             nodeBadge.innerText = node.category || 'Q&A';
             nodeProject.innerText = node.details.project || 'memlite';
-            detailFile.innerText = node.details.fileRef ? `References: ${node.details.fileRef}` : '';
+            
+            // Render Referenced & Modified Files
+            const files = Array.isArray(node.details.filesTouched) ? node.details.filesTouched : [];
+            const fileRef = node.details.fileRef;
+            const allFiles = Array.from(new Set([...(fileRef ? [fileRef] : []), ...files])).filter(Boolean);
+
+            if (allFiles.length > 0) {
+                detailFileSection.classList.remove('hidden');
+                detailFile.className = 'file-chips-container';
+                detailFile.innerHTML = allFiles.map(f => {
+                    const norm = f.replace(/\\/g, '/');
+                    const basename = norm.split('/').pop() || norm;
+                    return `<span class="file-chip" title="${escapeHtml(norm)}">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                        <span>${escapeHtml(basename)}</span>
+                    </span>`;
+                }).join('');
+            } else {
+                detailFileSection.classList.add('hidden');
+                detailFile.innerHTML = '';
+            }
             
             const pinLabel = btnPin.querySelector('.btn-label');
             if (pinnedNodeIds.has(node.id)) {
@@ -617,7 +637,8 @@
             nodeBadge.className = 'badge project';
             nodeBadge.innerText = 'Chat Session';
             nodeProject.innerText = 'Workspace';
-            detailFile.innerText = '';
+            detailFileSection.classList.add('hidden');
+            detailFile.innerHTML = '';
             
             btnContext.style.display = 'none';
             btnDelete.style.display = 'none';
@@ -811,11 +832,14 @@
         }
 
         // Bounded rendering: show latest timelineSessionLimit sessions to keep DOM ultra-light
-        const displayedSessionIds = activeSessions.slice(-timelineSessionLimit).reverse();
+        const displayedSessionIds = activeSessions.slice(0, timelineSessionLimit);
 
         displayedSessionIds.forEach((cId) => {
             const sIdx = activeSessions.indexOf(cId);
-            const items = conversations[cId].filter(n => isNodeMatchingFilters(n));
+            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const sLabel = sessionNode ? sessionNode.label : `Chat Session ${activeSessions.length - sIdx}`;
+            // Show latest steps at the top of the session
+            const items = conversations[cId].filter(n => isNodeMatchingFilters(n)).slice().reverse();
             if (items.length === 0) return;
 
             const groupDiv = document.createElement('div');
@@ -823,7 +847,7 @@
 
             const header = document.createElement('div');
             header.className = 'timeline-session-header';
-            header.innerHTML = `<span>💬 Chat Session ${sIdx + 1}</span> <span style="font-weight: 400; color: #64748b;">(${items.length} steps)</span>`;
+            header.innerHTML = `<span>💬 ${escapeHtml(sLabel)}</span> <span style="font-weight: 400; color: #64748b;">(${items.length} steps)</span>`;
             groupDiv.appendChild(header);
 
             items.forEach(node => {
@@ -1007,7 +1031,7 @@
                 </div>
             `;
         } else {
-            const displayedSessions = sessionNodes.slice(-sessionDeckLimit).reverse();
+            const displayedSessions = sessionNodes.slice(0, sessionDeckLimit);
             displayedSessions.forEach((s) => {
                 const originalIndex = sessionNodes.indexOf(s);
                 const card = document.createElement('div');
@@ -1022,7 +1046,7 @@
 
                 card.innerHTML = `
                     <div class="card-meta-row">
-                        <span class="session-number">Session ${originalIndex + 1}</span>
+                        <span class="session-number">${escapeHtml(s.label || ('Session ' + (sessionNodes.length - originalIndex)))}</span>
                         <span class="session-steps-tag">${memberCount} steps</span>
                     </div>
                     <div class="session-title">${escapeHtml(title)}</div>

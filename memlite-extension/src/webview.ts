@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { MemoryDatabase } from './database';
+import { stageContextToChat } from './extension';
 
 export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'memlite-graph-view';
@@ -93,10 +94,9 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
                     const contextPath = path.join(root, '.memlite_context.md');
                     try {
                         fs.writeFileSync(contextPath, capsule, 'utf8');
-                        await vscode.env.clipboard.writeText(capsule);
                         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(contextPath));
                         await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, false);
-                        vscode.window.showInformationMessage("⚡ MemLite: Agent Rehydration Capsule generated & copied to clipboard!");
+                        await stageContextToChat(capsule, "⚡ MemLite");
                     } catch (e) {
                         vscode.window.showErrorMessage(`MemLite: Failed to write context capsule: ${e}`);
                     }
@@ -143,13 +143,7 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
         contextBlock += `Question: "${text}"\nAnswer: "${answer}"\n`;
         contextBlock += `-----------------------`;
 
-        // Write directly to clipboard
-        await vscode.env.clipboard.writeText(contextBlock);
-        
-        // Show status message to notify developer
-        vscode.window.showInformationMessage(
-            "🧠 MemLite: Context from visual node & neighbors copied to clipboard! Paste it directly in your Copilot or Codex chat."
-        );
+        await stageContextToChat(contextBlock, "🧠 MemLite");
     }
 
     private getHtmlForWebview(webview: vscode.Webview): string {
