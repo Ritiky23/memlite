@@ -88,6 +88,12 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
                     this.refresh();
                     vscode.window.showInformationMessage(`🔓 MemLite: Invariant Rule revoked!`);
                     break;
+                case 'renameSession':
+                    if (message.conversationId) {
+                        this._db.renameSession(message.conversationId, message.newTitle, message.newProject);
+                        this.refresh();
+                    }
+                    break;
                 case 'rehydrateAgent':
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
                     const capsule = this._db.generateRehydrateCapsule(root);

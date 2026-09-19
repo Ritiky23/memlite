@@ -27,6 +27,10 @@
 
     // DOM Elements - Timeline & Context Recovery Deck
     const timelineStream = document.getElementById('timeline-stream');
+    const timelineSessionCounter = document.getElementById('timeline-session-counter');
+    const timelineProjectFilter = document.getElementById('timeline-project-filter');
+    const btnTimelineExpandAll = document.getElementById('btn-timeline-expand-all');
+    const btnTimelineCollapseAll = document.getElementById('btn-timeline-collapse-all');
     const colCardsInvariants = document.getElementById('col-cards-invariants');
     const colCardsFiles = document.getElementById('col-cards-files');
     const colCardsSessions = document.getElementById('col-cards-sessions');
@@ -38,6 +42,10 @@
     const btnAddInvariantCol = document.getElementById('btn-add-invariant-col');
     const btnRehydrateCol = document.getElementById('btn-rehydrate-col');
     const btnRehydrateHeader = document.getElementById('btn-rehydrate-header');
+
+    let collapsedSessionIds = new Set();
+    let hasInitializedCollapse = false;
+    let selectedProjectFilter = 'ALL';
 
     // DOM Elements - Sliding Detail Drawer
     const detailPanel = document.getElementById('detail-panel');
@@ -812,6 +820,36 @@
         }
     });
 
+    function formatSessionDate(isoString) {
+        if (!isoString) return null;
+        try {
+            const date = new Date(isoString);
+            if (isNaN(date.getTime())) return null;
+            const now = new Date();
+            const diffMs = now.getTime() - date.getTime();
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+
+            let relative = '';
+            if (diffMins < 1) relative = 'Just now';
+            else if (diffMins < 60) relative = `${diffMins}m ago`;
+            else if (diffHours < 24) relative = `${diffHours}h ago`;
+            else if (diffDays < 7) relative = `${diffDays}d ago`;
+            else {
+                const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                relative = `${date.getDate()} ${months[date.getMonth()]}`;
+            }
+
+            const hours = String(date.getHours()).padStart(2, '0');
+            const mins = String(date.getMinutes()).padStart(2, '0');
+            const exact = `${date.toLocaleDateString()} ${hours}:${mins}`;
+            return { relative, exact };
+        } catch (e) {
+            return null;
+        }
+    }
+
     // VIEW 2: Timeline Stream Rendering
     function renderTimeline() {
         if (currentView !== 'timeline') return; // Performance: lazy render only when timeline is active
@@ -826,29 +864,187 @@
         });
 
         const activeSessions = Object.keys(conversations);
-        if (activeSessions.length === 0) {
-            timelineStream.innerHTML = '<div style="text-align: center; color: #64748b; padding: 40px 0;">No memories recorded yet.</div>';
+
+        // Calculate session counts per project
+        const projectCounts = {};
+        activeSessions.forEach(cId => {
+            const rawItems = conversations[cId] || [];
+            const firstStep = rawItems[0];
+            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const proj = (sessionNode && sessionNode.details && sessionNode.details.project) || (firstStep && firstStep.details && firstStep.details.project) || 'General';
+            projectCounts[proj] = (projectCounts[proj] || 0) + 1;
+        });
+
+        // Populate Project Filter Dropdown
+        if (timelineProjectFilter) {
+            const projects = Object.keys(projectCounts).sort();
+            const currentFilter = selectedProjectFilter;
+            timelineProjectFilter.innerHTML = `<option value="ALL">📁 All Projects (${activeSessions.length})</option>` +
+                projects.map(p => `<option value="${escapeHtml(p)}" ${currentFilter === p ? 'selected' : ''}>📁 ${escapeHtml(p)} (${projectCounts[p]})</option>`).join('');
+            
+            if (currentFilter !== 'ALL' && !projectCounts[currentFilter]) {
+                selectedProjectFilter = 'ALL';
+                timelineProjectFilter.value = 'ALL';
+            }
+        }
+
+        // Filter sessions by selected project
+        const filteredSessionIds = activeSessions.filter(cId => {
+            if (selectedProjectFilter === 'ALL') return true;
+            const rawItems = conversations[cId] || [];
+            const firstStep = rawItems[0];
+            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const proj = (sessionNode && sessionNode.details && sessionNode.details.project) || (firstStep && firstStep.details && firstStep.details.project) || 'General';
+            return proj === selectedProjectFilter;
+        });
+
+        if (timelineSessionCounter) {
+            const countText = selectedProjectFilter === 'ALL' 
+                ? `${activeSessions.length} session${activeSessions.length === 1 ? '' : 's'}`
+                : `${filteredSessionIds.length} of ${activeSessions.length} sessions (${selectedProjectFilter})`;
+            timelineSessionCounter.innerText = countText;
+        }
+
+        if (filteredSessionIds.length === 0) {
+            timelineStream.innerHTML = '<div style="text-align: center; color: #64748b; padding: 40px 0;">No memories recorded for this project.</div>';
             return;
         }
 
+        // Initialize default collapse state: keep first 2 sessions expanded, collapse older sessions if many
+        if (!hasInitializedCollapse) {
+            hasInitializedCollapse = true;
+            if (activeSessions.length > 2) {
+                activeSessions.slice(2).forEach(id => collapsedSessionIds.add(id));
+            }
+        }
+
         // Bounded rendering: show latest timelineSessionLimit sessions to keep DOM ultra-light
-        const displayedSessionIds = activeSessions.slice(0, timelineSessionLimit);
+        const displayedSessionIds = filteredSessionIds.slice(0, timelineSessionLimit);
 
         displayedSessionIds.forEach((cId) => {
             const sIdx = activeSessions.indexOf(cId);
             const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
-            const sLabel = sessionNode ? sessionNode.label : `Chat Session ${activeSessions.length - sIdx}`;
+            
+            const rawItems = conversations[cId] || [];
+            const firstStep = rawItems[0];
+            const project = (sessionNode && sessionNode.details && sessionNode.details.project) || (firstStep && firstStep.details && firstStep.details.project) || 'General';
+            const customTitle = (sessionNode && sessionNode.details && sessionNode.details.customTitle) || '';
+            const sessionNumber = (sessionNode && sessionNode.details && sessionNode.details.sessionNumber) || (activeSessions.length - sIdx);
+            const defaultLabel = `Session ${sessionNumber}`;
+            const displayTitle = customTitle || defaultLabel;
+            
+            // Latest timestamp
+            const latestTs = (sessionNode && sessionNode.details && sessionNode.details.timestamp) || (rawItems.length > 0 ? rawItems[rawItems.length - 1].timestamp : '');
+            const timeObj = formatSessionDate(latestTs);
+
+            const isCollapsed = collapsedSessionIds.has(cId);
+
             // Show latest steps at the top of the session
-            const items = conversations[cId].filter(n => isNodeMatchingFilters(n)).slice().reverse();
+            const items = rawItems.filter(n => isNodeMatchingFilters(n)).slice().reverse();
             if (items.length === 0) return;
 
             const groupDiv = document.createElement('div');
-            groupDiv.className = 'timeline-session-group';
+            groupDiv.className = `timeline-session-group ${isCollapsed ? 'collapsed' : ''}`;
 
             const header = document.createElement('div');
             header.className = 'timeline-session-header';
-            header.innerHTML = `<span>💬 ${escapeHtml(sLabel)}</span> <span style="font-weight: 400; color: #64748b;">(${items.length} steps)</span>`;
+            header.title = 'Click to expand / collapse session steps';
+
+            const timeHtml = timeObj ? `<span class="session-time-pill" title="${escapeHtml(timeObj.exact)}">🕒 ${escapeHtml(timeObj.relative)}</span>` : '';
+
+            header.innerHTML = `
+                <div class="session-header-left">
+                    <span class="session-chevron">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </span>
+                    <span class="session-project-pill" title="Project: ${escapeHtml(project)}">📁 ${escapeHtml(project)}</span>
+                    <div class="session-title-wrap" id="title-wrap-${cId}">
+                        <span class="session-title-text" title="Click edit icon or double-click to rename">${escapeHtml(displayTitle)}</span>
+                        <button class="session-edit-btn" title="Rename session & project" data-cid="${cId}">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                        </button>
+                    </div>
+                    <span class="session-steps-tag">${items.length} steps</span>
+                </div>
+                <div class="session-header-right">
+                    ${timeHtml}
+                </div>
+            `;
+
+            // Toggle collapse when clicking header (except when clicking edit button or input)
+            header.addEventListener('click', (e) => {
+                if (e.target.closest('.session-edit-btn') || e.target.closest('.session-edit-form')) {
+                    return;
+                }
+                if (collapsedSessionIds.has(cId)) {
+                    collapsedSessionIds.delete(cId);
+                    groupDiv.classList.remove('collapsed');
+                } else {
+                    collapsedSessionIds.add(cId);
+                    groupDiv.classList.add('collapsed');
+                }
+            });
+
+            // Inline Edit Handler
+            const editBtn = header.querySelector('.session-edit-btn');
+            const titleWrap = header.querySelector(`#title-wrap-${cId}`);
+
+            const startEditing = (e) => {
+                e.stopPropagation();
+                const currentName = customTitle || defaultLabel;
+                titleWrap.innerHTML = `
+                    <form class="session-edit-form" id="form-rename-${cId}">
+                        <input type="text" class="session-edit-input" value="${escapeHtml(currentName)}" placeholder="Session name..." maxlength="60" autofocus />
+                        <input type="text" class="session-edit-input" id="input-proj-${cId}" value="${escapeHtml(project)}" placeholder="Project..." style="width: 85px; color: #38bdf8; border-color: #38bdf8;" maxlength="30" />
+                        <button type="submit" class="session-save-btn" title="Save">✓</button>
+                        <button type="button" class="session-cancel-btn" title="Cancel">✕</button>
+                    </form>
+                `;
+                const form = titleWrap.querySelector(`#form-rename-${cId}`);
+                const input = form.querySelector('.session-edit-input');
+                const projInput = form.querySelector(`#input-proj-${cId}`);
+                const cancelBtn = form.querySelector('.session-cancel-btn');
+
+                input.focus();
+                input.select();
+
+                form.addEventListener('submit', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const newTitle = input.value.trim();
+                    const newProject = projInput ? projInput.value.trim() : undefined;
+                    if (vscode) {
+                        vscode.postMessage({
+                            type: 'renameSession',
+                            conversationId: cId,
+                            newTitle: newTitle,
+                            newProject: newProject
+                        });
+                    }
+                });
+
+                cancelBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    renderTimeline();
+                });
+
+                input.addEventListener('keydown', (ev) => {
+                    if (ev.key === 'Escape') {
+                        ev.stopPropagation();
+                        renderTimeline();
+                    }
+                });
+            };
+
+            if (editBtn) editBtn.addEventListener('click', startEditing);
+            const titleText = header.querySelector('.session-title-text');
+            if (titleText) titleText.addEventListener('dblclick', startEditing);
+
             groupDiv.appendChild(header);
+
+            // Session Body containing the step cards
+            const bodyDiv = document.createElement('div');
+            bodyDiv.className = 'timeline-session-body';
 
             items.forEach(node => {
                 const card = document.createElement('div');
@@ -874,9 +1070,10 @@
                         </button>
                     </div>
                 `;
-                groupDiv.appendChild(card);
+                bodyDiv.appendChild(card);
             });
 
+            groupDiv.appendChild(bodyDiv);
             timelineStream.appendChild(groupDiv);
         });
 
@@ -891,6 +1088,31 @@
             });
             timelineStream.appendChild(moreSessionsDiv);
         }
+    }
+
+    if (btnTimelineExpandAll) {
+        btnTimelineExpandAll.addEventListener('click', () => {
+            collapsedSessionIds.clear();
+            renderTimeline();
+        });
+    }
+
+    if (btnTimelineCollapseAll) {
+        btnTimelineCollapseAll.addEventListener('click', () => {
+            rawNodes.forEach(n => {
+                if (n.type === 'qa' && n.details && n.details.conversationId) {
+                    collapsedSessionIds.add(n.details.conversationId);
+                }
+            });
+            renderTimeline();
+        });
+    }
+
+    if (timelineProjectFilter) {
+        timelineProjectFilter.addEventListener('change', (e) => {
+            selectedProjectFilter = e.target.value;
+            renderTimeline();
+        });
     }
 
     // VIEW 3: Category Board Rendering
@@ -1043,13 +1265,17 @@
 
                 const memberCount = rawLinks.filter(l => l.source === s.id && l.type === 'session_member').length;
                 let title = (s.fullTitle || s.label || '').replace(/^💬\s*"/, '').replace(/"$/, '');
+                const proj = (s.details && s.details.project) || 'General';
+                const timeObj = formatSessionDate(s.details && s.details.timestamp);
 
                 card.innerHTML = `
                     <div class="card-meta-row">
+                        <span class="session-project-pill" style="font-size: 8px; padding: 0 5px;">📁 ${escapeHtml(proj)}</span>
                         <span class="session-number">${escapeHtml(s.label || ('Session ' + (sessionNodes.length - originalIndex)))}</span>
                         <span class="session-steps-tag">${memberCount} steps</span>
                     </div>
                     <div class="session-title">${escapeHtml(title)}</div>
+                    ${timeObj ? `<div style="font-size: 9px; color: #64748b; margin-top: 4px;" title="${escapeHtml(timeObj.exact)}">🕒 ${escapeHtml(timeObj.relative)}</div>` : ''}
                 `;
                 colCardsSessions.appendChild(card);
             });

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { MemoryDatabase } from './database';
 import { TranscriptWatcher } from './watcher';
 import { MemoryGraphWebviewProvider } from './webview';
@@ -11,17 +12,47 @@ let activePanel: vscode.WebviewPanel | undefined = undefined;
 export function activate(context: vscode.ExtensionContext) {
     console.log('MemLite: Extension is now active!');
 
-    // Initialize database in workspace storage if available, falling back to global storage
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const storagePath = context.storageUri ? context.storageUri.fsPath : context.globalStorageUri.fsPath;
-    const db = new MemoryDatabase(storagePath);
+    // Unified master storage in ~/.memlite so ALL windows, workspaces & IDEs share one central database
+    const homeDir = os.homedir() || process.env.USERPROFILE || process.env.HOME || '';
+    const masterDbPath = path.join(homeDir, '.memlite');
+    if (!fs.existsSync(masterDbPath)) {
+        try { fs.mkdirSync(masterDbPath, { recursive: true }); } catch (e) {}
+    }
+    const db = new MemoryDatabase(masterDbPath);
 
-    // Auto-clean any records that originated from foreign projects
-    if (workspaceRoot) {
-        db.pruneForeignRecords(workspaceRoot);
+    // Auto-migrate from any previous workspace-isolated or globalStorage databases
+    try {
+        if (context.globalStorageUri && fs.existsSync(context.globalStorageUri.fsPath)) {
+            const legacyGlobal = path.join(context.globalStorageUri.fsPath, 'memlite_db.json');
+            if (fs.existsSync(legacyGlobal)) {
+                db.mergeFrom(legacyGlobal);
+            }
+        }
+        if (context.storageUri && fs.existsSync(context.storageUri.fsPath)) {
+            const localDbPath = path.join(context.storageUri.fsPath, 'memlite_db.json');
+            if (fs.existsSync(localDbPath)) {
+                db.mergeFrom(localDbPath);
+            }
+        }
+
+        const appDataRoot = path.dirname(context.globalStorageUri.fsPath);
+        const wsStorageRoot = path.join(appDataRoot, '..', 'workspaceStorage');
+        if (fs.existsSync(wsStorageRoot)) {
+            const wsFolders = fs.readdirSync(wsStorageRoot);
+            for (const folder of wsFolders) {
+                const possible = path.join(wsStorageRoot, folder, 'memlite.memlite-extension', 'memlite_db.json');
+                if (fs.existsSync(possible)) {
+                    db.mergeFrom(possible);
+                }
+            }
+        }
+    } catch (e) {
+        console.error("MemLite: Error during storage migration:", e);
     }
 
-    // Initialize and start log watcher scoped to workspace
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Initialize and start log watcher
     watcher = new TranscriptWatcher(db, workspaceRoot);
     watcher.start();
 

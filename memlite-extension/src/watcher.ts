@@ -77,8 +77,8 @@ export class TranscriptWatcher {
             // Sort by most recent mtime descending
             candidateFiles.sort((a, b) => b.mtime - a.mtime);
 
-            // Bounded scan: only top 5 recent transcripts to avoid freezing/lagging on startup
-            const toScan = candidateFiles.slice(0, 5);
+            // Scan all available recent transcripts (up to 500)
+            const toScan = candidateFiles.slice(0, 500);
             let anyNewRecords = false;
             for (const item of toScan) {
                 const added = this.processTranscriptFile(item.filePath, false);
@@ -155,6 +155,10 @@ export class TranscriptWatcher {
                 }
             }
 
+            // Determine conversation-level project from transcript content & tool calls
+            const allTurnToolCalls = turns.flatMap(t => t.toolCalls);
+            const detectedProject = this.detectProjectName(lines, allTurnToolCalls, vscode.workspace.name || "General");
+
             // Process every turn and record/update into database
             for (const turn of turns) {
                 const toolInfo = this.extractToolContextAndActions(
@@ -175,13 +179,17 @@ export class TranscriptWatcher {
 
                 const stepKey = `${conversationId}_${turn.stepIndex}`;
                 const activeEditor = vscode.window.activeTextEditor;
-                const fileRef = activeEditor ? activeEditor.document.fileName : undefined;
-                const project = vscode.workspace.name || "Default Project";
+                const fileRef = activeEditor ? activeEditor.document.fileName : (toolInfo.filesTouched[0] || undefined);
+                
+                // If this turn specifically touched files, detect turn-level project, else use conversation-level project
+                const turnProject = toolInfo.filesTouched.length > 0 
+                    ? this.detectProjectName([], turn.toolCalls, detectedProject)
+                    : detectedProject;
 
                 const result = this.db.upsertRecord(
                     turn.question,
                     fullAnswer,
-                    project,
+                    turnProject,
                     fileRef,
                     [stepKey, "auto-log"],
                     conversationId,
@@ -448,6 +456,79 @@ export class TranscriptWatcher {
         const cleaned = text.replace(/[^a-z0-9\s]/g, '').trim();
         if (trivialClicks.includes(cleaned)) return false;
         return cleaned.length > 2;
+    }
+
+    private detectProjectName(lines: string[], toolCalls: any[], defaultName?: string): string {
+        const skip = ["src","lib","dist","out","node_modules","public","components","pages","tests","media","scratch",".system_generated","logs","Dashboard","BotConfigs","Users","AppData","Local","Programs","Microsoft","Windows"];
+
+        const extractFromPath = (rawPath: string): string | null => {
+            const norm = rawPath.replace(/\\\\/g, '/').replace(/\\/g, '/');
+            const m = norm.match(/([a-zA-Z]:\/[^"\s\r\n]+)/);
+            if (m) {
+                const parts = m[1].split('/').filter(Boolean);
+                for (let i = parts.length - 1; i >= 0; i--) {
+                    const seg = parts[i];
+                    if (!seg.includes('.') && !skip.includes(seg) && !seg.includes(':') && seg.length > 1) {
+                        if (seg === 'memlite-extension') return 'memlite';
+                        return seg;
+                    }
+                }
+            }
+            return null;
+        };
+
+        // 1. Check tool calls for absolute paths
+        if (Array.isArray(toolCalls)) {
+            for (const tc of toolCalls) {
+                const args = tc.args || tc.parameters || {};
+                const candidates = [
+                    args.Cwd,
+                    args.TargetFile,
+                    args.SearchPath,
+                    args.AbsolutePath,
+                    args.DirectoryPath,
+                    args.CommandLine,
+                    args.filePath
+                ];
+                for (const cand of candidates) {
+                    if (typeof cand === 'string') {
+                        const found = extractFromPath(cand);
+                        if (found) return found;
+                    }
+                }
+            }
+        }
+
+        // 2. Check early transcript lines (first 50 lines) for workspace mapping
+        if (Array.isArray(lines)) {
+            for (let i = 0; i < Math.min(lines.length, 50); i++) {
+                const line = lines[i];
+                const norm = line.replace(/\\\\/g, '/');
+                
+                // Workspace URI mapping: [URI] -> [CorpusName]: <path> -> ...
+                const wsMatch = norm.match(/\[URI\]\s*->\s*\[CorpusName\]:[\s\S]*?([a-zA-Z]:\/[^\s\r\n\\]+)\s*->/);
+                if (wsMatch) {
+                    const found = extractFromPath(wsMatch[1]);
+                    if (found) return found;
+                }
+
+                // General tool call properties inside JSON lines
+                const toolMatch = norm.match(/"(?:TargetFile|Cwd|SearchPath|DirectoryPath|AbsolutePath|filePath)":\s*"([a-zA-Z]:\/[^"\r\n]+)"/);
+                if (toolMatch) {
+                    const found = extractFromPath(toolMatch[1]);
+                    if (found) return found;
+                }
+
+                // Command line paths inside JSON lines
+                const cmdMatch = norm.match(/(?:-Path|cd|dir|ls|--cwd)\s+([a-zA-Z]:\/[^\s"\r\n]+)/i);
+                if (cmdMatch) {
+                    const found = extractFromPath(cmdMatch[1]);
+                    if (found) return found;
+                }
+            }
+        }
+
+        return defaultName || "General";
     }
 
     public stop() {

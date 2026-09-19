@@ -51,6 +51,8 @@ export interface DatabaseSchema {
     relationships: Relationship[];
     invariants: InvariantItem[];
     fileActions: FileActionItem[];
+    sessionTitles?: Record<string, string>;
+    sessionProjects?: Record<string, string>;
 }
 
 export class MemoryDatabase {
@@ -63,7 +65,7 @@ export class MemoryDatabase {
             fs.mkdirSync(storagePath, { recursive: true });
         }
         this.dbPath = path.join(storagePath, 'memlite_db.json');
-        this.data = { nodes: [], relationships: [], invariants: [], fileActions: [] };
+        this.data = { nodes: [], relationships: [], invariants: [], fileActions: [], sessionTitles: {}, sessionProjects: {} };
         this.load();
     }
 
@@ -76,9 +78,11 @@ export class MemoryDatabase {
                 if (!this.data.relationships) { this.data.relationships = []; }
                 if (!this.data.invariants) { this.data.invariants = []; }
                 if (!this.data.fileActions) { this.data.fileActions = []; }
+                if (!this.data.sessionTitles) { this.data.sessionTitles = {}; }
+                if (!this.data.sessionProjects) { this.data.sessionProjects = {}; }
             } catch (e) {
                 console.error("Failed to load MemLite database, resetting:", e);
-                this.data = { nodes: [], relationships: [], invariants: [], fileActions: [] };
+                this.data = { nodes: [], relationships: [], invariants: [], fileActions: [], sessionTitles: {}, sessionProjects: {} };
             }
         } else {
             this.save();
@@ -86,6 +90,7 @@ export class MemoryDatabase {
 
         this.indexedSteps.clear();
         this.data.nodes.forEach(n => {
+            n.project = this.correctProject(n);
             if (n.conversationId && n.stepIndex !== undefined) {
                 this.indexedSteps.add(`${n.conversationId}_${n.stepIndex}`);
             }
@@ -95,6 +100,38 @@ export class MemoryDatabase {
                 });
             }
         });
+    }
+
+    public correctProject(node: MemoryNode): string {
+        if (node.conversationId && this.data.sessionProjects && this.data.sessionProjects[node.conversationId]) {
+            return this.data.sessionProjects[node.conversationId];
+        }
+        const textToScan = [
+            node.fileRef || '',
+            ...(node.filesTouched || []),
+            node.answer || '',
+            node.question || ''
+        ].join(' ').replace(/\\\\/g, '/');
+
+        if (textToScan.includes('/godseye_frontend/client') || textToScan.includes('/client/src')) {
+            return 'client';
+        }
+        if (textToScan.includes('/memlite/') || textToScan.includes('/memlite-extension/')) {
+            return 'memlite';
+        }
+        const m = textToScan.match(/([a-zA-Z]:\/[a-zA-Z0-9_\-./]+)/);
+        if (m) {
+            const parts = m[1].split('/').filter(Boolean);
+            const skip = ["src","lib","dist","out","node_modules","public","components","pages","tests","media","scratch",".system_generated","logs","Dashboard","BotConfigs","Users","AppData","Local","Programs","Microsoft","Windows"];
+            for (let i = parts.length - 1; i >= 0; i--) {
+                const seg = parts[i];
+                if (!seg.includes(".") && !skip.includes(seg) && !seg.includes(":")) {
+                    if (seg === "memlite-extension") return "memlite";
+                    return seg;
+                }
+            }
+        }
+        return node.project || "General";
     }
 
     public save() {
@@ -153,7 +190,11 @@ export class MemoryDatabase {
                 existingNode.question = question;
                 existingNode.answer = answer;
                 existingNode.timestamp = new Date().toISOString();
-                existingNode.project = project || existingNode.project || "Default Project";
+                if (project && project !== "Default Project" && project !== "General") {
+                    existingNode.project = project;
+                } else if (!existingNode.project) {
+                    existingNode.project = "Default Project";
+                }
                 if (fileRef) existingNode.fileRef = fileRef;
                 existingNode.filesTouched = Array.from(new Set([...(existingNode.filesTouched || []), ...(filesTouched || [])]));
                 existingNode.contextType = contextType;
@@ -264,6 +305,92 @@ export class MemoryDatabase {
             if (scope && r.scope !== "global" && r.scope !== scope) return false;
             return true;
         });
+    }
+
+    public renameSession(conversationId: string, newTitle?: string, newProject?: string) {
+        if (!this.data.sessionTitles) {
+            this.data.sessionTitles = {};
+        }
+        if (!this.data.sessionProjects) {
+            this.data.sessionProjects = {};
+        }
+
+        if (newTitle !== undefined) {
+            const trimmed = newTitle.trim();
+            if (trimmed) {
+                this.data.sessionTitles[conversationId] = trimmed;
+            } else {
+                delete this.data.sessionTitles[conversationId];
+            }
+        }
+
+        if (newProject !== undefined) {
+            const trimmedProj = newProject.trim();
+            if (trimmedProj) {
+                this.data.sessionProjects[conversationId] = trimmedProj;
+                this.data.nodes.forEach(n => {
+                    if (n.conversationId === conversationId) {
+                        n.project = trimmedProj;
+                    }
+                });
+            } else {
+                delete this.data.sessionProjects[conversationId];
+            }
+        }
+        this.save();
+    }
+
+    public mergeFrom(sourceDbPath: string): number {
+        try {
+            if (!fs.existsSync(sourceDbPath)) return 0;
+            const raw = fs.readFileSync(sourceDbPath, 'utf8');
+            const parsed = JSON.parse(raw);
+            let mergedCount = 0;
+
+            if (parsed.nodes && Array.isArray(parsed.nodes)) {
+                parsed.nodes.forEach((n: MemoryNode) => {
+                    const stepKey = (n.conversationId && n.stepIndex !== undefined) ? `${n.conversationId}_${n.stepIndex}` : null;
+                    const exists = this.data.nodes.some(existing => 
+                        (n.conversationId && existing.conversationId === n.conversationId && existing.stepIndex === n.stepIndex) ||
+                        existing.id === n.id
+                    );
+                    if (!exists) {
+                        this.data.nodes.push(n);
+                        if (stepKey) this.indexedSteps.add(stepKey);
+                        mergedCount++;
+                    }
+                });
+            }
+
+            if (parsed.sessionTitles && typeof parsed.sessionTitles === 'object') {
+                this.data.sessionTitles = { ...parsed.sessionTitles, ...this.data.sessionTitles };
+            }
+            if (parsed.sessionProjects && typeof parsed.sessionProjects === 'object') {
+                this.data.sessionProjects = { ...parsed.sessionProjects, ...this.data.sessionProjects };
+            }
+            if (parsed.invariants && Array.isArray(parsed.invariants)) {
+                parsed.invariants.forEach((inv: InvariantItem) => {
+                    if (!this.data.invariants.some(i => i.id === inv.id)) {
+                        this.data.invariants.push(inv);
+                    }
+                });
+            }
+            if (parsed.fileActions && Array.isArray(parsed.fileActions)) {
+                parsed.fileActions.forEach((fa: FileActionItem) => {
+                    if (!this.data.fileActions.some(f => f.id === fa.id)) {
+                        this.data.fileActions.push(fa);
+                    }
+                });
+            }
+
+            if (mergedCount > 0) {
+                this.save();
+            }
+            return mergedCount;
+        } catch (e) {
+            console.error(`Failed to merge database from ${sourceDbPath}:`, e);
+            return 0;
+        }
     }
 
     // --- File Provenance (Tier 1 & 2) Methods ---
@@ -427,12 +554,18 @@ export class MemoryDatabase {
             if (group.length === 0) return;
 
             const firstNode = group[0];
-            let chatTitle = firstNode.question.replace(/\n/g, ' ').trim();
-            if (chatTitle.length > 35) {
-                chatTitle = chatTitle.substring(0, 32) + "...";
+            const customProject = this.data.sessionProjects ? this.data.sessionProjects[cId] : undefined;
+            const project = customProject || firstNode.project || "General";
+            const latestTimestamp = group.reduce((max, n) => (n.timestamp && n.timestamp > max) ? n.timestamp : max, firstNode.timestamp || '');
+            const sessionNum = sortedConvIds.length - chatIndex;
+            const customTitle = this.data.sessionTitles ? this.data.sessionTitles[cId] : undefined;
+            const chatLabel = customTitle ? `Session ${sessionNum}: ${customTitle}` : `Session ${sessionNum}`;
+
+            let chatTitle = customTitle || firstNode.question.replace(/\n/g, ' ').trim();
+            if (!customTitle && chatTitle.length > 40) {
+                chatTitle = chatTitle.substring(0, 37) + "...";
             }
             const fullTitle = `💬 "${chatTitle}"`;
-            const chatLabel = `Session ${sortedConvIds.length - chatIndex}`;
             const chatId = `chat_${cId}`;
 
             visualNodes.push({
@@ -440,7 +573,15 @@ export class MemoryDatabase {
                 label: chatLabel,
                 type: "chat_session",
                 category: "Session",
-                fullTitle: fullTitle
+                fullTitle: fullTitle,
+                details: {
+                    conversationId: cId,
+                    project: project,
+                    sessionNumber: sessionNum,
+                    customTitle: customTitle,
+                    timestamp: latestTimestamp,
+                    stepCount: group.length
+                } as any
             });
 
             group.forEach((n, index) => {

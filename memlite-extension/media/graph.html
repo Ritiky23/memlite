@@ -102,6 +102,19 @@
         <!-- VIEW 2: Timeline Stream View -->
         <main id="view-timeline" class="view-panel">
             <div class="timeline-container">
+                <div class="timeline-toolbar">
+                    <div class="timeline-toolbar-left">
+                        <span class="timeline-toolbar-title">💬 Session Threads</span>
+                        <span id="timeline-session-counter" class="timeline-toolbar-badge">0 sessions</span>
+                    </div>
+                    <div class="timeline-toolbar-actions">
+                        <select id="timeline-project-filter" class="timeline-select-filter" title="Filter sessions by project">
+                            <option value="ALL">📁 All Projects</option>
+                        </select>
+                        <button id="btn-timeline-expand-all" class="timeline-tool-btn" title="Expand all sessions">Expand All</button>
+                        <button id="btn-timeline-collapse-all" class="timeline-tool-btn" title="Collapse all sessions">Collapse All</button>
+                    </div>
+                </div>
                 <div id="timeline-stream" class="timeline-stream">
                     <!-- Timeline cards injected dynamically -->
                 </div>

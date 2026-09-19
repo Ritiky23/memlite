@@ -607,33 +607,303 @@ html, body {
     overflow-y: auto;
 }
 
+/* ==========================================================================
+   Timeline Stream & Session Accordions
+   ========================================================================== */
+
 .timeline-container {
-    max-width: 800px;
+    max-width: 860px;
     margin: 0 auto;
     width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 40px;
+}
+
+.timeline-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    margin-bottom: 4px;
+}
+
+.timeline-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.timeline-toolbar-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+.timeline-toolbar-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: #94a3b8;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 2px 7px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.timeline-toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.timeline-select-filter {
+    background: #090c15;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 4px;
+    outline: none;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.timeline-select-filter:hover, .timeline-select-filter:focus {
+    border-color: #38bdf8;
+    color: #ffffff;
+}
+
+.timeline-select-filter option {
+    background: #0d1017;
+    color: #f1f5f9;
+}
+
+.timeline-tool-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #94a3b8;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 3px 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.timeline-tool-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+    color: #f1f5f9;
+    border-color: rgba(255, 255, 255, 0.15);
 }
 
 .timeline-stream {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
 }
 
 .timeline-session-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    background: rgba(255, 255, 255, 0.015);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.timeline-session-group:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.timeline-session-group.collapsed {
+    background: rgba(255, 255, 255, 0.01);
 }
 
 .timeline-session-header {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     color: #f1f5f9;
-    padding: 4px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.025);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s ease;
+}
+
+.timeline-session-group.collapsed .timeline-session-header {
+    border-bottom: none;
+}
+
+.timeline-session-header:hover {
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.session-header-left {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.session-chevron {
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #64748b;
+    transition: transform 0.2s ease, color 0.15s ease;
+    flex-shrink: 0;
+}
+
+.timeline-session-group:not(.collapsed) .session-chevron {
+    transform: rotate(90deg);
+    color: #94a3b8;
+}
+
+.session-project-pill {
+    font-size: 10px;
+    font-weight: 600;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    padding: 1px 7px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.session-title-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.session-title-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: #f1f5f9;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
+}
+
+.session-edit-btn {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.6;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.session-edit-btn:hover {
+    opacity: 1;
+    color: #cbd5e1;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.session-edit-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.session-edit-input {
+    background: #090c15;
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    outline: none;
+    width: 220px;
+}
+
+.session-save-btn, .session-cancel-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.session-save-btn:hover {
+    background: #22c55e;
+    color: #ffffff;
+    border-color: #22c55e;
+}
+
+.session-cancel-btn:hover {
+    background: #ef4444;
+    color: #ffffff;
+    border-color: #ef4444;
+}
+
+.session-steps-tag {
+    font-size: 10px;
+    font-weight: 500;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.03);
+    padding: 1px 6px;
+    border-radius: 10px;
+    flex-shrink: 0;
+}
+
+.session-header-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.session-time-pill {
+    font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.03);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    white-space: nowrap;
+}
+
+.timeline-session-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    transition: all 0.2s ease;
+}
+
+.timeline-session-group.collapsed .timeline-session-body {
+    display: none;
 }
 
 /* ==========================================================================
