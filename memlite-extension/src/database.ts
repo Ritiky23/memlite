@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 
 export interface InvariantItem {
     id: string;
@@ -59,6 +60,10 @@ export class MemoryDatabase {
     private dbPath: string;
     private data: DatabaseSchema;
     private indexedSteps: Set<string> = new Set();
+    private stepNodeMap: Map<string, MemoryNode> = new Map();
+    private idNodeMap: Map<string, MemoryNode> = new Map();
+    private fileRefNodesMap: Map<string, MemoryNode[]> = new Map();
+    private saveTimeout: NodeJS.Timeout | null = null;
 
     constructor(storagePath: string) {
         if (!fs.existsSync(storagePath)) {
@@ -69,74 +74,383 @@ export class MemoryDatabase {
         this.load();
     }
 
+    private safeJsonParse(raw: string): any {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            try {
+                const cleaned = raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+                return JSON.parse(cleaned);
+            } catch (e2) {
+                console.error("Safe JSON parse error:", e2);
+                return null;
+            }
+        }
+    }
+
     private load() {
         if (fs.existsSync(this.dbPath)) {
-            try {
-                const raw = fs.readFileSync(this.dbPath, 'utf8');
-                this.data = JSON.parse(raw);
-                if (!this.data.nodes) { this.data.nodes = []; }
-                if (!this.data.relationships) { this.data.relationships = []; }
-                if (!this.data.invariants) { this.data.invariants = []; }
-                if (!this.data.fileActions) { this.data.fileActions = []; }
-                if (!this.data.sessionTitles) { this.data.sessionTitles = {}; }
-                if (!this.data.sessionProjects) { this.data.sessionProjects = {}; }
-            } catch (e) {
-                console.error("Failed to load MemLite database, resetting:", e);
+            let loaded = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const raw = fs.readFileSync(this.dbPath, 'utf8');
+                    if (raw.trim().length > 0) {
+                        const parsed = this.safeJsonParse(raw);
+                        if (parsed) {
+                            this.data = parsed;
+                            loaded = true;
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    if (attempt < 2) {
+                        const start = Date.now();
+                        while (Date.now() - start < 50) {}
+                    }
+                }
+            }
+            if (!loaded) {
+                const bakPath = this.dbPath + '.bak';
+                if (fs.existsSync(bakPath)) {
+                    try {
+                        const rawBak = fs.readFileSync(bakPath, 'utf8');
+                        const parsedBak = this.safeJsonParse(rawBak);
+                        if (parsedBak) {
+                            this.data = parsedBak;
+                            loaded = true;
+                        }
+                    } catch (_) {}
+                }
+            }
+            if (!loaded) {
                 this.data = { nodes: [], relationships: [], invariants: [], fileActions: [], sessionTitles: {}, sessionProjects: {} };
             }
+            if (!this.data.nodes) { this.data.nodes = []; }
+            if (!this.data.relationships) { this.data.relationships = []; }
+            if (!this.data.invariants) { this.data.invariants = []; }
+            if (!this.data.fileActions) { this.data.fileActions = []; }
+            if (!this.data.sessionTitles) { this.data.sessionTitles = {}; }
+            if (!this.data.sessionProjects) { this.data.sessionProjects = {}; }
         } else {
-            this.save();
+            this.save(true);
         }
 
+        this.sanitizeDatabase();
+
         this.indexedSteps.clear();
+        this.stepNodeMap.clear();
+        this.idNodeMap.clear();
+        this.fileRefNodesMap.clear();
+
         this.data.nodes.forEach(n => {
-            n.project = this.correctProject(n);
+            if (n.id) {
+                this.idNodeMap.set(n.id, n);
+            }
             if (n.conversationId && n.stepIndex !== undefined) {
-                this.indexedSteps.add(`${n.conversationId}_${n.stepIndex}`);
+                const stepKey = `${n.conversationId}_${n.stepIndex}`;
+                this.indexedSteps.add(stepKey);
+                this.stepNodeMap.set(stepKey, n);
             }
             if (n.tags) {
                 n.tags.forEach(t => {
-                    if (t.includes('_')) this.indexedSteps.add(t);
+                    if (t.includes('_')) {
+                        this.indexedSteps.add(t);
+                        if (!this.stepNodeMap.has(t)) {
+                            this.stepNodeMap.set(t, n);
+                        }
+                    }
                 });
+            }
+            if (n.fileRef) {
+                const existing = this.fileRefNodesMap.get(n.fileRef) || [];
+                existing.push(n);
+                this.fileRefNodesMap.set(n.fileRef, existing);
+            }
+            if (n.conversationId && this.data.sessionProjects && this.data.sessionProjects[n.conversationId]) {
+                n.project = this.data.sessionProjects[n.conversationId];
             }
         });
     }
 
+    private sanitizeDatabase() {
+        if (!this.data.nodes || !Array.isArray(this.data.nodes)) return;
+
+        const convGroups: { [cId: string]: MemoryNode[] } = {};
+        this.data.nodes.forEach(n => {
+            // Clean bogus fileRef if node touched no files and fileRef looks like IDE active editor leak
+            if (n.fileRef) {
+                if (n.fileRef.startsWith('original_') || 
+                    ((!n.filesTouched || n.filesTouched.length === 0) && n.fileRef.includes('memlite-extension'))) {
+                    n.fileRef = undefined;
+                }
+            }
+
+            const cId = n.conversationId || 'unknown';
+            if (!convGroups[cId]) convGroups[cId] = [];
+            convGroups[cId].push(n);
+        });
+
+        // Re-evaluate sessionProjects for sessions without custom user titles
+        Object.keys(convGroups).forEach(cId => {
+            const hasUserTitle = this.data.sessionTitles && this.data.sessionTitles[cId];
+            if (hasUserTitle) return; // Respect user customizations
+
+            const group = convGroups[cId];
+            const projectVotes: { [p: string]: number } = {};
+
+            for (const n of group) {
+                const detected = this.correctProject(n);
+                if (detected && detected !== 'General' && detected !== 'Default Project') {
+                    projectVotes[detected] = (projectVotes[detected] || 0) + 1;
+                }
+            }
+
+            const sorted = Object.entries(projectVotes).sort((a, b) => b[1] - a[1]);
+            const existing = this.data.sessionProjects?.[cId];
+            const finalProject = sorted.length > 0 
+                ? sorted[0][0] 
+                : (existing && existing !== 'Default Project' ? existing : 'General');
+
+            if (!this.data.sessionProjects) this.data.sessionProjects = {};
+            this.data.sessionProjects[cId] = finalProject;
+            group.forEach(n => {
+                n.project = finalProject;
+            });
+        });
+
+        // Sync historical timestamps and accurate project detection from brain directory
+        try {
+            const homeDir = os.homedir() || process.env.USERPROFILE || process.env.HOME || '';
+            const brainPath = path.join(homeDir, '.gemini', 'antigravity-ide', 'brain');
+            if (fs.existsSync(brainPath)) {
+                Object.keys(convGroups).forEach(cId => {
+                    const tPath = path.join(brainPath, cId, '.system_generated', 'logs', 'transcript.jsonl');
+                    if (fs.existsSync(tPath)) {
+                        try {
+                            const rawContent = fs.readFileSync(tPath, 'utf8');
+                            const lines = rawContent.split('\n').filter(l => l.trim().length > 0);
+                            if (lines.length > 0) {
+                                try {
+                                    const obj = JSON.parse(lines[0]);
+                                    if (obj.created_at) {
+                                        convGroups[cId].forEach(n => {
+                                            n.timestamp = obj.created_at;
+                                        });
+                                    }
+                                } catch (_) {}
+
+                                // Check if we can determine a better project from transcript lines if not customized by user
+                                const hasUserTitle = this.data.sessionTitles && this.data.sessionTitles[cId];
+                                if (!hasUserTitle) {
+                                    const detected = this.detectProjectFromTranscriptLines(lines);
+                                    if (detected && detected !== 'General' && detected !== 'Default Project') {
+                                        if (!this.data.sessionProjects) this.data.sessionProjects = {};
+                                        this.data.sessionProjects[cId] = detected;
+                                        convGroups[cId].forEach(n => {
+                                            n.project = detected;
+                                        });
+                                    }
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                });
+            }
+        } catch (_) {}
+    }
+
+    public getSessionProject(conversationId: string): string | undefined {
+        return this.data.sessionProjects ? this.data.sessionProjects[conversationId] : undefined;
+    }
+
     public correctProject(node: MemoryNode): string {
-        if (node.conversationId && this.data.sessionProjects && this.data.sessionProjects[node.conversationId]) {
-            return this.data.sessionProjects[node.conversationId];
-        }
+        // IMPORTANT: Do NOT read from sessionProjects cache here — caller decides that.
+        // This function ONLY uses file paths and text signatures for detection.
         const textToScan = [
             node.fileRef || '',
             ...(node.filesTouched || []),
-            node.answer || '',
+            // Only scan short answer/question snippets to avoid false positives from conversation context
+            (node.answer || '').substring(0, 500),
             node.question || ''
-        ].join(' ').replace(/\\\\/g, '/');
+        ].join(' ').replace(/\\/g, '/');
 
-        if (textToScan.includes('/godseye_frontend/client') || textToScan.includes('/client/src')) {
+        // High-confidence workspace signatures (path-based only)
+        if (textToScan.includes('godseye_frontend/client') || textToScan.includes('/client/src') || textToScan.includes('/client/')) {
             return 'client';
         }
-        if (textToScan.includes('/memlite/') || textToScan.includes('/memlite-extension/')) {
+        if (textToScan.includes('My_Dream/memlite') || textToScan.includes('/memlite-extension') || textToScan.includes('/memlite/')) {
             return 'memlite';
         }
-        const m = textToScan.match(/([a-zA-Z]:\/[a-zA-Z0-9_\-./]+)/);
-        if (m) {
-            const parts = m[1].split('/').filter(Boolean);
-            const skip = ["src","lib","dist","out","node_modules","public","components","pages","tests","media","scratch",".system_generated","logs","Dashboard","BotConfigs","Users","AppData","Local","Programs","Microsoft","Windows"];
+        if (textToScan.includes('CM/optimus') || textToScan.includes('/optimus/')) {
+            return 'optimus';
+        }
+
+        const blacklist = new Set([
+            'c', 'd', 'e', 'cm', 'users', 'lenovo', 'appdata', 'local', 'programs', 'microsoft',
+            'windows', 'antigravity-ide', 'antigravity', 'gemini', 'brain', 'system_generated',
+            'logs', '.system_generated', 'scratch', 'dashboard', 'audit', 'botconfigs', 'build',
+            'out', 'dist', 'node_modules', 'public', 'src', 'components', 'hooks', 'pages', 'tests',
+            'media', 'temp', 'tmp', 'general', 'default project', 'workspace', 'home'
+        ]);
+
+        // Only detect from absolute paths in file refs (highest confidence)
+        const filePaths = [node.fileRef || '', ...(node.filesTouched || [])].join(' ').replace(/\\/g, '/');
+        const m = filePaths.matchAll(/([a-zA-Z]:\/[a-zA-Z0-9_\-./]+)/g);
+        for (const match of m) {
+            const parts = match[1].split('/').filter(Boolean);
             for (let i = parts.length - 1; i >= 0; i--) {
-                const seg = parts[i];
-                if (!seg.includes(".") && !skip.includes(seg) && !seg.includes(":")) {
-                    if (seg === "memlite-extension") return "memlite";
-                    return seg;
+                const seg = parts[i].trim();
+                const low = seg.toLowerCase();
+                const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg);
+                if (!seg.includes('.') && !seg.includes(':') && seg.length > 2 && !blacklist.has(low) && !isUuid) {
+                    return seg === 'memlite-extension' ? 'memlite' : seg;
                 }
             }
         }
-        return node.project || "General";
+
+        // No path-based signals found — return General (do NOT fall back to node.project)
+        return "General";
     }
 
-    public save() {
+    // Update the auto-detected project for a session (will not override user-renamed sessions)
+    public updateAutoDetectedProject(conversationId: string, project: string): boolean {
+        if (!conversationId || !project || project === 'General' || project === 'Default Project') return false;
+        if (!this.data.sessionProjects) this.data.sessionProjects = {};
+        // Never override a user-set custom title's associated project
+        const hasUserTitle = this.data.sessionTitles && this.data.sessionTitles[conversationId];
+        if (hasUserTitle) return false;
+        const existing = this.data.sessionProjects[conversationId];
+        if (existing !== project) {
+            this.data.sessionProjects[conversationId] = project;
+            // Also update all nodes in this session
+            this.data.nodes.forEach(n => {
+                if (n.conversationId === conversationId) {
+                    n.project = project;
+                }
+            });
+            return true;
+        }
+        return false;
+    }
+
+    public detectProjectFromTranscriptLines(lines: string[]): string {
+        const blacklist = new Set([
+            'c', 'd', 'e', 'cm', 'users', 'lenovo', 'appdata', 'local', 'programs', 'microsoft',
+            'windows', 'antigravity-ide', 'antigravity', 'gemini', 'brain', 'system_generated',
+            'logs', '.system_generated', 'scratch', 'dashboard', 'audit', 'botconfigs', 'build',
+            'out', 'dist', 'node_modules', 'public', 'src', 'components', 'hooks', 'pages', 'tests',
+            'media', 'temp', 'tmp', 'general', 'default project', 'workspace', 'home'
+        ]);
+
+        const extractFromText = (text: string): string | null => {
+            if (!text) return null;
+            const norm = text.replace(/\\/g, '/');
+            if (norm.includes('godseye_frontend/client') || norm.includes('/client/src') || norm.includes('/client/')) return 'client';
+            if (norm.includes('My_Dream/memlite') || norm.includes('/memlite-extension') || norm.includes('/memlite/')) return 'memlite';
+            if (norm.includes('CM/optimus') || norm.includes('/optimus/') || norm.includes('optimus')) return 'optimus';
+
+            const matches = norm.matchAll(/([a-zA-Z]:\/[a-zA-Z0-9_\-./]+)/g);
+            for (const match of matches) {
+                const parts = match[1].split('/').filter(Boolean);
+                for (let i = parts.length - 1; i >= 0; i--) {
+                    const seg = parts[i].trim();
+                    const low = seg.toLowerCase();
+                    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg);
+                    if (!seg.includes('.') && !seg.includes(':') && seg.length > 2 && !blacklist.has(low) && !isUuid) {
+                        return seg === 'memlite-extension' ? 'memlite' : seg;
+                    }
+                }
+            }
+            return null;
+        };
+
+        // 1. Check Active Document, workspace URI mappings in initial lines
+        for (let i = 0; i < Math.min(lines.length, 5); i++) {
+            try {
+                const obj = JSON.parse(lines[i]);
+                const content = obj.content || '';
+                if (content) {
+                    const mDoc = content.match(/Active Document:\s*([^\r\n]+)/i);
+                    if (mDoc) {
+                        const rawDoc = mDoc[1].replace(/\(LANGUAGE_[^)]+\)/, '').trim();
+                        const found = extractFromText(rawDoc);
+                        if (found) return found;
+                    }
+                    const mWs = content.match(/([a-zA-Z]:[\\/][^\r\n\t\s<>]+)\s*->/);
+                    if (mWs) {
+                        const found = extractFromText(mWs[1].trim());
+                        if (found) return found;
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // 2. Check tool calls and general lines
+        const checkIndices = new Set<number>();
+        for (let i = 0; i < Math.min(lines.length, 40); i++) checkIndices.add(i);
+        for (let i = Math.max(0, lines.length - 15); i < lines.length; i++) checkIndices.add(i);
+
+        for (const idx of checkIndices) {
+            const line = lines[idx];
+            let text = '';
+            try {
+                const obj = JSON.parse(line);
+                text = (obj.content || '') + ' ' + (obj.tool_calls ? JSON.stringify(obj.tool_calls) : '');
+            } catch (_) {
+                text = line;
+            }
+
+            const found = extractFromText(text);
+            if (found) return found;
+        }
+
+        return "General";
+    }
+
+    public save(immediate: boolean = false) {
+        if (immediate) {
+            if (this.saveTimeout) {
+                clearTimeout(this.saveTimeout);
+                this.saveTimeout = null;
+            }
+            this.writeDatabaseToDisk();
+            return;
+        }
+
+        if (!this.saveTimeout) {
+            this.saveTimeout = setTimeout(() => {
+                this.saveTimeout = null;
+                this.writeDatabaseToDisk();
+            }, 500);
+        }
+    }
+
+    public flush() {
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+            this.writeDatabaseToDisk();
+        }
+    }
+
+    private writeDatabaseToDisk() {
         try {
-            fs.writeFileSync(this.dbPath, JSON.stringify(this.data, null, 2), 'utf8');
+            const dir = path.dirname(this.dbPath);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            const tempPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).substring(2, 8)}.tmp`;
+            const content = JSON.stringify(this.data, null, 2);
+            fs.writeFileSync(tempPath, content, 'utf8');
+            try {
+                fs.renameSync(tempPath, this.dbPath);
+            } catch (renameErr) {
+                fs.copyFileSync(tempPath, this.dbPath);
+                try { fs.unlinkSync(tempPath); } catch (_) {}
+            }
+            try {
+                fs.copyFileSync(this.dbPath, this.dbPath + '.bak');
+            } catch (_) {}
         } catch (e) {
             console.error("Failed to save MemLite database:", e);
         }
@@ -151,7 +465,8 @@ export class MemoryDatabase {
         conversationId?: string,
         stepIndex?: number,
         filesTouched?: string[],
-        contextType?: "decision" | "code_change" | "milestone" | "discussion"
+        contextType?: "decision" | "code_change" | "milestone" | "discussion",
+        recordTimestamp?: string
     ): { node: MemoryNode; isNew: boolean; isUpdated: boolean } {
         const extractedTags = this.extractTags(question + " " + answer);
         const uniqueTags = Array.from(new Set([...manualTags, ...extractedTags]))
@@ -173,24 +488,37 @@ export class MemoryDatabase {
         
         let existingNode: MemoryNode | undefined;
         if (stepKey) {
-            existingNode = this.data.nodes.find(n => 
-                (n.conversationId === conversationId && n.stepIndex === stepIndex) ||
-                (n.tags && n.tags.includes(stepKey))
-            );
+            existingNode = this.stepNodeMap.get(stepKey);
         }
 
         if (existingNode) {
             const currentFiles = (existingNode.filesTouched || []).slice().sort().join(',');
             const newFiles = (filesTouched || []).slice().sort().join(',');
+            
+            // Check if project needs correction (wrong auto-detection from previous scan)
+            const hasNoUserRename = !this.data.sessionTitles?.[conversationId || ''];
+            const projectNeedsUpdate = project && project !== 'General' && project !== 'Default Project' &&
+                                       project !== existingNode.project && hasNoUserRename;
+
             const isChanged = existingNode.answer !== answer || 
                               existingNode.question !== question ||
-                              currentFiles !== newFiles;
+                              currentFiles !== newFiles ||
+                              !!projectNeedsUpdate;
             
             if (isChanged) {
                 existingNode.question = question;
                 existingNode.answer = answer;
-                existingNode.timestamp = new Date().toISOString();
-                if (project && project !== "Default Project" && project !== "General") {
+                if (recordTimestamp) {
+                    existingNode.timestamp = recordTimestamp;
+                }
+                if (projectNeedsUpdate) {
+                    // Correct the wrong project
+                    existingNode.project = project;
+                    if (conversationId) {
+                        if (!this.data.sessionProjects) this.data.sessionProjects = {};
+                        this.data.sessionProjects[conversationId] = project;
+                    }
+                } else if (project && project !== "Default Project" && project !== "General") {
                     existingNode.project = project;
                 } else if (!existingNode.project) {
                     existingNode.project = "Default Project";
@@ -199,8 +527,11 @@ export class MemoryDatabase {
                 existingNode.filesTouched = Array.from(new Set([...(existingNode.filesTouched || []), ...(filesTouched || [])]));
                 existingNode.contextType = contextType;
                 existingNode.tags = Array.from(new Set([...existingNode.tags, ...uniqueTags]));
-                this.save();
+                this.save(false);
                 return { node: existingNode, isNew: false, isUpdated: true };
+            }
+            if (recordTimestamp && (!existingNode.timestamp || existingNode.timestamp > recordTimestamp)) {
+                existingNode.timestamp = recordTimestamp;
             }
             return { node: existingNode, isNew: false, isUpdated: false };
         }
@@ -210,7 +541,7 @@ export class MemoryDatabase {
             id,
             question,
             answer,
-            timestamp: new Date().toISOString(),
+            timestamp: recordTimestamp || new Date().toISOString(),
             project: project || "Default Project",
             fileRef,
             filesTouched: filesTouched || [],
@@ -221,14 +552,26 @@ export class MemoryDatabase {
         };
 
         this.data.nodes.push(newNode);
+        this.idNodeMap.set(id, newNode);
         if (stepKey) {
             this.indexedSteps.add(stepKey);
+            this.stepNodeMap.set(stepKey, newNode);
         }
         manualTags.forEach(t => {
-            if (t.includes('_')) this.indexedSteps.add(t);
+            if (t.includes('_')) {
+                this.indexedSteps.add(t);
+                if (!this.stepNodeMap.has(t)) {
+                    this.stepNodeMap.set(t, newNode);
+                }
+            }
         });
+        if (fileRef) {
+            const list = this.fileRefNodesMap.get(fileRef) || [];
+            list.push(newNode);
+            this.fileRefNodesMap.set(fileRef, list);
+        }
         this.createAutoRelationships(newNode);
-        this.save();
+        this.save(false);
         return { node: newNode, isNew: true, isUpdated: false };
     }
 
@@ -337,7 +680,7 @@ export class MemoryDatabase {
                 delete this.data.sessionProjects[conversationId];
             }
         }
-        this.save();
+        this.save(true);
     }
 
     public mergeFrom(sourceDbPath: string): number {
@@ -401,7 +744,6 @@ export class MemoryDatabase {
         } else {
             this.data.fileActions.push(actionItem);
         }
-        this.save();
     }
 
     public checkFileFreshness(workspaceRoot: string): { stale: { file: string; warning: string }[]; freshCount: number } {
@@ -514,15 +856,14 @@ export class MemoryDatabase {
     }
 
     private createAutoRelationships(node: MemoryNode) {
-        this.data.nodes.forEach(other => {
-            if (other.id === node.id) { return; }
-            if (node.fileRef && other.fileRef && node.fileRef === other.fileRef) {
-                this.data.relationships.push({
-                    source: node.id,
-                    target: other.id,
-                    type: "same_file"
-                });
-            }
+        if (!node.fileRef) return;
+        const matching = (this.fileRefNodesMap.get(node.fileRef) || []).filter(other => other.id !== node.id);
+        matching.slice(-5).forEach(other => {
+            this.data.relationships.push({
+                source: node.id,
+                target: other.id,
+                type: "same_file"
+            });
         });
     }
 
@@ -554,8 +895,41 @@ export class MemoryDatabase {
             if (group.length === 0) return;
 
             const firstNode = group[0];
-            const customProject = this.data.sessionProjects ? this.data.sessionProjects[cId] : undefined;
-            const project = customProject || firstNode.project || "General";
+            const hasUserTitle = this.data.sessionTitles?.[cId];
+            const cachedProject = this.data.sessionProjects?.[cId];
+            let project: string | undefined = hasUserTitle ? cachedProject : undefined;
+
+            // Always run path-based vote detection (correctProject now ONLY uses file paths, not node.project)
+            if (!project || project === 'General' || project === 'Default Project') {
+                const projectVotes: { [p: string]: number } = {};
+                for (const n of group) {
+                    const detected = this.correctProject(n);
+                    if (detected && detected !== 'General' && detected !== 'Default Project') {
+                        projectVotes[detected] = (projectVotes[detected] || 0) + 1;
+                    }
+                }
+                const sortedVotes = Object.entries(projectVotes).sort((a, b) => b[1] - a[1]);
+                if (sortedVotes.length > 0) {
+                    project = sortedVotes[0][0];
+                }
+            }
+
+            // If still no project from file paths, use the cached value (could be from transcript workspace detection)
+            if (!project || project === 'General' || project === 'Default Project') {
+                project = cachedProject || 'General';
+            }
+
+            // Update the cache whenever we have a confident project (without overriding user renames)
+            if (project && project !== 'General' && project !== 'Default Project' && !hasUserTitle) {
+                if (!this.data.sessionProjects) this.data.sessionProjects = {};
+                if (this.data.sessionProjects[cId] !== project) {
+                    this.data.sessionProjects[cId] = project;
+                }
+            }
+
+            group.forEach(n => {
+                n.project = project;
+            });
             const latestTimestamp = group.reduce((max, n) => (n.timestamp && n.timestamp > max) ? n.timestamp : max, firstNode.timestamp || '');
             const sessionNum = sortedConvIds.length - chatIndex;
             const customTitle = this.data.sessionTitles ? this.data.sessionTitles[cId] : undefined;

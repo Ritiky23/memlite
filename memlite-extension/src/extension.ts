@@ -8,6 +8,18 @@ import { MemoryGraphWebviewProvider } from './webview';
 
 let watcher: TranscriptWatcher | null = null;
 let activePanel: vscode.WebviewPanel | undefined = undefined;
+let dbInstance: MemoryDatabase | null = null;
+
+export function getCurrentWorkspaceProject(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return 'ALL';
+    const norm = root.replace(/\\/g, '/');
+    if (norm.includes('godseye_frontend/client') || norm.includes('/client')) return 'client';
+    if (norm.includes('My_Dream/memlite') || norm.includes('/memlite')) return 'memlite';
+    if (norm.includes('CM/optimus') || norm.includes('/optimus')) return 'optimus';
+    const base = path.basename(norm);
+    return (base && base !== 'src' && base !== 'workspace') ? base : 'ALL';
+}
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('MemLite: Extension is now active!');
@@ -19,35 +31,26 @@ export function activate(context: vscode.ExtensionContext) {
         try { fs.mkdirSync(masterDbPath, { recursive: true }); } catch (e) {}
     }
     const db = new MemoryDatabase(masterDbPath);
+    dbInstance = db;
 
-    // Auto-migrate from any previous workspace-isolated or globalStorage databases
-    try {
-        if (context.globalStorageUri && fs.existsSync(context.globalStorageUri.fsPath)) {
-            const legacyGlobal = path.join(context.globalStorageUri.fsPath, 'memlite_db.json');
-            if (fs.existsSync(legacyGlobal)) {
-                db.mergeFrom(legacyGlobal);
-            }
-        }
-        if (context.storageUri && fs.existsSync(context.storageUri.fsPath)) {
-            const localDbPath = path.join(context.storageUri.fsPath, 'memlite_db.json');
-            if (fs.existsSync(localDbPath)) {
-                db.mergeFrom(localDbPath);
-            }
-        }
-
-        const appDataRoot = path.dirname(context.globalStorageUri.fsPath);
-        const wsStorageRoot = path.join(appDataRoot, '..', 'workspaceStorage');
-        if (fs.existsSync(wsStorageRoot)) {
-            const wsFolders = fs.readdirSync(wsStorageRoot);
-            for (const folder of wsFolders) {
-                const possible = path.join(wsStorageRoot, folder, 'memlite.memlite-extension', 'memlite_db.json');
-                if (fs.existsSync(possible)) {
-                    db.mergeFrom(possible);
+    // Auto-migrate from any previous legacy storage once in background without blocking startup
+    const migrationMarker = path.join(masterDbPath, '.migrated');
+    if (!fs.existsSync(migrationMarker)) {
+        setTimeout(() => {
+            try {
+                if (context.globalStorageUri && fs.existsSync(context.globalStorageUri.fsPath)) {
+                    const legacyGlobal = path.join(context.globalStorageUri.fsPath, 'memlite_db.json');
+                    if (fs.existsSync(legacyGlobal)) db.mergeFrom(legacyGlobal);
                 }
+                if (context.storageUri && fs.existsSync(context.storageUri.fsPath)) {
+                    const localDbPath = path.join(context.storageUri.fsPath, 'memlite_db.json');
+                    if (fs.existsSync(localDbPath)) db.mergeFrom(localDbPath);
+                }
+                fs.writeFileSync(migrationMarker, new Date().toISOString(), 'utf8');
+            } catch (e) {
+                console.error("MemLite: Error during storage migration:", e);
             }
-        }
-    } catch (e) {
-        console.error("MemLite: Error during storage migration:", e);
+        }, 1000);
     }
 
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -72,7 +75,8 @@ export function activate(context: vscode.ExtensionContext) {
             if (activePanel) {
                 activePanel.webview.postMessage({
                     type: 'updateGraph',
-                    data: db.getGraphData()
+                    data: db.getGraphData(),
+                    currentProject: getCurrentWorkspaceProject()
                 });
             }
         })
@@ -114,7 +118,8 @@ export function activate(context: vscode.ExtensionContext) {
                     case 'ready':
                         panel.webview.postMessage({
                             type: 'updateGraph',
-                            data: db.getGraphData()
+                            data: db.getGraphData(),
+                            currentProject: getCurrentWorkspaceProject()
                         });
                         break;
                     case 'deleteNode':
@@ -174,6 +179,49 @@ export function activate(context: vscode.ExtensionContext) {
                         break;
                     case 'pruneForeign':
                         await vscode.commands.executeCommand('memlite.pruneForeignMemories');
+                        break;
+                    case 'renameSession':
+                        if (message.conversationId) {
+                            db.renameSession(message.conversationId, message.newTitle, message.newProject);
+                            provider.refresh();
+                            if (activePanel) {
+                                activePanel.webview.postMessage({
+                                    type: 'updateGraph',
+                                    data: db.getGraphData()
+                                });
+                            }
+                            vscode.window.showInformationMessage(`MemLite: Session updated.`);
+                        }
+                        break;
+                    case 'addRecord':
+                        db.addRecord(
+                            message.question,
+                            message.answer || '',
+                            message.project || 'General',
+                            message.fileRef,
+                            message.tags || [],
+                            message.conversationId || `manual_${Date.now()}`,
+                            1
+                        );
+                        provider.refresh();
+                        if (activePanel) {
+                            activePanel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                        }
+                        vscode.window.showInformationMessage(`🧠 MemLite: Memory added successfully!`);
+                        break;
+                    case 'createRelation':
+                        db.addRelationship(message.source, message.target, message.relationType || 'SIMILAR');
+                        provider.refresh();
+                        if (activePanel) {
+                            activePanel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                        }
+                        break;
+                    case 'deleteRelation':
+                        db.deleteRelationship(message.source, message.target);
+                        provider.refresh();
+                        if (activePanel) {
+                            activePanel.webview.postMessage({ type: 'updateGraph', data: db.getGraphData() });
+                        }
                         break;
                 }
             });
@@ -365,6 +413,9 @@ export async function stageContextToChat(contextText: string, notificationPrefix
 export function deactivate() {
     if (watcher) {
         watcher.stop();
+    }
+    if (dbInstance) {
+        dbInstance.flush();
     }
     console.log('MemLite: Extension is deactivated.');
 }

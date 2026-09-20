@@ -35,7 +35,10 @@ export class TranscriptWatcher {
 
     private startWatching() {
         console.log(`MemLite Watcher: Monitoring transcripts at ${this.brainPath}`);
-        this.scanExistingLogs();
+        // Defer heavy log scanning to background so extension activation and webview rendering are instant
+        setTimeout(() => {
+            this.scanExistingLogs();
+        }, 200);
 
         try {
             this.watcher = fs.watch(this.brainPath, { recursive: true }, (eventType, filename) => {
@@ -77,8 +80,8 @@ export class TranscriptWatcher {
             // Sort by most recent mtime descending
             candidateFiles.sort((a, b) => b.mtime - a.mtime);
 
-            // Scan all available recent transcripts (up to 500)
-            const toScan = candidateFiles.slice(0, 500);
+            // Scan top 50 most recent transcripts on startup for fast, comprehensive startup
+            const toScan = candidateFiles.slice(0, 50);
             let anyNewRecords = false;
             for (const item of toScan) {
                 const added = this.processTranscriptFile(item.filePath, false);
@@ -86,6 +89,7 @@ export class TranscriptWatcher {
             }
 
             if (anyNewRecords) {
+                this.db.save(true);
                 vscode.commands.executeCommand('memlite.refreshGraphView');
             }
         } catch (e) {
@@ -116,6 +120,7 @@ export class TranscriptWatcher {
                 question: string;
                 textResponses: string[];
                 toolCalls: any[];
+                timestamp?: string;
             }
 
             const turns: ConversationTurn[] = [];
@@ -132,7 +137,8 @@ export class TranscriptWatcher {
                                 stepIndex: logObj.step_index ?? 0,
                                 question: cleanedQuestion,
                                 textResponses: [],
-                                toolCalls: []
+                                toolCalls: [],
+                                timestamp: logObj.created_at || undefined
                             };
                             turns.push(currentTurn);
                         } else {
@@ -157,7 +163,27 @@ export class TranscriptWatcher {
 
             // Determine conversation-level project from transcript content & tool calls
             const allTurnToolCalls = turns.flatMap(t => t.toolCalls);
-            const detectedProject = this.detectProjectName(lines, allTurnToolCalls, vscode.workspace.name || "General");
+            let detectedProject = this.detectProjectName(lines, allTurnToolCalls);
+
+            // If no project from tool calls / active document / file paths (e.g. casual chat or questions):
+            if (!detectedProject || detectedProject === 'General' || detectedProject === 'Default Project') {
+                const existingCached = this.db.getSessionProject(conversationId);
+                const localProj = this.getLocalWorkspaceProject();
+                const isFocused = vscode.window.state.focused;
+
+                if (existingCached && existingCached !== 'General' && existingCached !== 'Default Project') {
+                    detectedProject = existingCached;
+                } else if (isFocused && localProj !== 'General') {
+                    detectedProject = localProj;
+                } else {
+                    detectedProject = 'General';
+                }
+            }
+
+            // Correct stale cached project if we now have a better signal
+            if (detectedProject && detectedProject !== 'General' && detectedProject !== 'Default Project') {
+                this.db.updateAutoDetectedProject(conversationId, detectedProject);
+            }
 
             // Process every turn and record/update into database
             for (const turn of turns) {
@@ -178,8 +204,8 @@ export class TranscriptWatcher {
                 }
 
                 const stepKey = `${conversationId}_${turn.stepIndex}`;
-                const activeEditor = vscode.window.activeTextEditor;
-                const fileRef = activeEditor ? activeEditor.document.fileName : (toolInfo.filesTouched[0] || undefined);
+                // Only associate fileRef if a file was actually touched or referenced in this turn
+                const fileRef = toolInfo.filesTouched[0] || undefined;
                 
                 // If this turn specifically touched files, detect turn-level project, else use conversation-level project
                 const turnProject = toolInfo.filesTouched.length > 0 
@@ -195,7 +221,8 @@ export class TranscriptWatcher {
                     conversationId,
                     turn.stepIndex,
                     toolInfo.filesTouched,
-                    toolInfo.filesTouched.length > 0 ? "code_change" : "discussion"
+                    toolInfo.filesTouched.length > 0 ? "code_change" : "discussion",
+                    turn.timestamp
                 );
 
                 if (result.isNew || result.isUpdated) {
@@ -225,10 +252,10 @@ export class TranscriptWatcher {
             }
         }
         return cleaned
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
             .replace(/\\n/g, '\n')
             .replace(/\\t/g, '\t')
             .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\')
             .trim();
     }
 
@@ -280,26 +307,72 @@ export class TranscriptWatcher {
         return crypto.createHash('sha256').update(normalized, 'utf8').digest('hex').substring(0, 16);
     }
 
-    private isInsideWorkspace(targetPath: string): boolean {
+    public getLocalWorkspaceProject(): string {
+        if (!this.workspaceRoot) return 'General';
+        const res = this.extractProjectAndRelPath(this.workspaceRoot);
+        if (res.project && res.project !== 'General') {
+            return res.project;
+        }
+        const base = path.basename(this.workspaceRoot.replace(/\\/g, '/'));
+        return base || 'General';
+    }
+
+    private isUserWorkspaceFile(targetPath: string): boolean {
         if (!targetPath) return false;
-        if (!this.workspaceRoot) return true;
-        const normRoot = this.workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-        const normTarget = targetPath.replace(/\\/g, '/').toLowerCase();
-        return normTarget.startsWith(normRoot + '/') || 
-               normTarget === normRoot || 
-               (!normTarget.includes(':') && !normTarget.startsWith('/'));
+        const norm = targetPath.replace(/\\/g, '/').toLowerCase();
+        if (norm.includes('.gemini/antigravity-ide/brain') || 
+            norm.includes('appdata/local') || 
+            norm.includes('node_modules')) {
+            return false;
+        }
+        return true;
+    }
+
+    private extractProjectAndRelPath(rawPath: string): { project: string; relPath: string } {
+        if (!rawPath || typeof rawPath !== 'string') return { project: 'General', relPath: '' };
+        const norm = rawPath.replace(/\\/g, '/');
+
+        const blacklist = new Set([
+            'c', 'd', 'e', 'cm', 'users', 'lenovo', 'appdata', 'local', 'programs', 'microsoft',
+            'windows', 'antigravity-ide', 'antigravity', 'gemini', 'brain', 'system_generated',
+            'logs', '.system_generated', 'scratch', 'temp', 'tmp', 'home', 'projects', 'workspace', 'my_dream'
+        ]);
+
+        if (norm.includes('godseye_frontend/client') || norm.includes('/client/src') || norm.includes('/client/')) {
+            const idx = norm.indexOf('client');
+            const after = norm.substring(idx + 'client'.length).replace(/^\/+/, '');
+            return { project: 'client', relPath: after || 'client' };
+        }
+        if (norm.includes('My_Dream/memlite') || norm.includes('/memlite-extension') || norm.includes('/memlite/')) {
+            const idx = norm.indexOf('memlite');
+            const after = norm.substring(idx + 'memlite'.length).replace(/^\/+/, '');
+            return { project: 'memlite', relPath: after || 'memlite' };
+        }
+        if (norm.includes('CM/optimus') || norm.includes('/optimus/') || norm.includes('optimus')) {
+            const idx = norm.indexOf('optimus');
+            const after = norm.substring(idx + 'optimus'.length).replace(/^\/+/, '');
+            return { project: 'optimus', relPath: after || 'optimus' };
+        }
+
+        const m = norm.match(/^[a-zA-Z]:\/(.+)$/);
+        if (m) {
+            const parts = m[1].split('/').filter(Boolean);
+            for (let i = 0; i < parts.length; i++) {
+                const seg = parts[i];
+                const low = seg.toLowerCase();
+                if (!blacklist.has(low) && !/^[0-9a-f]{8}-[0-9a-f]{4}/.test(low) && !seg.includes('.')) {
+                    const proj = seg === 'memlite-extension' ? 'memlite' : seg;
+                    const rel = parts.slice(i + 1).join('/');
+                    return { project: proj, relPath: rel || proj };
+                }
+            }
+        }
+
+        return { project: 'General', relPath: path.basename(norm) };
     }
 
     private getRelativePath(targetPath: string): string {
-        if (!targetPath) return '';
-        const normTarget = targetPath.replace(/\\/g, '/');
-        if (this.workspaceRoot) {
-            const normRoot = this.workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
-            if (normTarget.toLowerCase().startsWith(normRoot.toLowerCase() + '/')) {
-                return normTarget.substring(normRoot.length + 1);
-            }
-        }
-        return path.basename(normTarget);
+        return this.extractProjectAndRelPath(targetPath).relPath;
     }
 
     private extractToolContextAndActions(
@@ -321,9 +394,9 @@ export class TranscriptWatcher {
             
             if (name === 'write_to_file' || name === 'create_file') {
                 const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
-                if (rawFile && this.isInsideWorkspace(rawFile)) {
+                if (rawFile && this.isUserWorkspaceFile(rawFile)) {
                     hasActions = true;
-                    const relFile = this.getRelativePath(rawFile);
+                    const { relPath: relFile } = this.extractProjectAndRelPath(rawFile);
                     const code = this.cleanArg(args.CodeContent || args.content || args.file_text || '');
                     filesTouchedSet.add(relFile);
 
@@ -347,9 +420,9 @@ export class TranscriptWatcher {
                 }
             } else if (name === 'replace_file_content' || name === 'edit_file' || name === 'apply_diff' || name === 'apply_patch') {
                 const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
-                if (rawFile && this.isInsideWorkspace(rawFile)) {
+                if (rawFile && this.isUserWorkspaceFile(rawFile)) {
                     hasActions = true;
-                    const relFile = this.getRelativePath(rawFile);
+                    const { relPath: relFile } = this.extractProjectAndRelPath(rawFile);
                     const rep = this.cleanArg(args.ReplacementContent || args.replacement || args.content || '');
                     filesTouchedSet.add(relFile);
 
@@ -377,9 +450,9 @@ export class TranscriptWatcher {
                 }
             } else if (name === 'multi_replace_file_content') {
                 const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
-                if (rawFile && this.isInsideWorkspace(rawFile)) {
+                if (rawFile && this.isUserWorkspaceFile(rawFile)) {
                     hasActions = true;
-                    const relFile = this.getRelativePath(rawFile);
+                    const { relPath: relFile } = this.extractProjectAndRelPath(rawFile);
                     filesTouchedSet.add(relFile);
 
                     summary += `\n\n✏️ **Multi-line Edit in File:** \`${relFile}\``;
@@ -459,25 +532,13 @@ export class TranscriptWatcher {
     }
 
     private detectProjectName(lines: string[], toolCalls: any[], defaultName?: string): string {
-        const skip = ["src","lib","dist","out","node_modules","public","components","pages","tests","media","scratch",".system_generated","logs","Dashboard","BotConfigs","Users","AppData","Local","Programs","Microsoft","Windows"];
-
         const extractFromPath = (rawPath: string): string | null => {
-            const norm = rawPath.replace(/\\\\/g, '/').replace(/\\/g, '/');
-            const m = norm.match(/([a-zA-Z]:\/[^"\s\r\n]+)/);
-            if (m) {
-                const parts = m[1].split('/').filter(Boolean);
-                for (let i = parts.length - 1; i >= 0; i--) {
-                    const seg = parts[i];
-                    if (!seg.includes('.') && !skip.includes(seg) && !seg.includes(':') && seg.length > 1) {
-                        if (seg === 'memlite-extension') return 'memlite';
-                        return seg;
-                    }
-                }
-            }
-            return null;
+            if (!rawPath || typeof rawPath !== 'string') return null;
+            const res = this.extractProjectAndRelPath(rawPath);
+            return (res.project && res.project !== 'General') ? res.project : null;
         };
 
-        // 1. Check tool calls for absolute paths
+        // 1. Highest priority: Check tool calls for absolute project paths
         if (Array.isArray(toolCalls)) {
             for (const tc of toolCalls) {
                 const args = tc.args || tc.parameters || {};
@@ -499,36 +560,75 @@ export class TranscriptWatcher {
             }
         }
 
-        // 2. Check early transcript lines (first 50 lines) for workspace mapping
-        if (Array.isArray(lines)) {
-            for (let i = 0; i < Math.min(lines.length, 50); i++) {
-                const line = lines[i];
-                const norm = line.replace(/\\\\/g, '/');
-                
-                // Workspace URI mapping: [URI] -> [CorpusName]: <path> -> ...
-                const wsMatch = norm.match(/\[URI\]\s*->\s*\[CorpusName\]:[\s\S]*?([a-zA-Z]:\/[^\s\r\n\\]+)\s*->/);
-                if (wsMatch) {
-                    const found = extractFromPath(wsMatch[1]);
-                    if (found) return found;
-                }
+        // 2. Second priority: Check Active Document and Workspace Mapping in USER_INPUT / SYSTEM metadata
+        if (Array.isArray(lines) && lines.length > 0) {
+            for (let i = 0; i < Math.min(lines.length, 5); i++) {
+                try {
+                    const obj = JSON.parse(lines[i]);
+                    const content = obj.content || '';
+                    if (content) {
+                        // Check Active Document
+                        const mDoc = content.match(/Active Document:\s*([^\r\n]+)/i);
+                        if (mDoc) {
+                            const rawDoc = mDoc[1].replace(/\(LANGUAGE_[^)]+\)/, '').trim();
+                            const found = extractFromPath(rawDoc);
+                            if (found) return found;
+                        }
 
-                // General tool call properties inside JSON lines
-                const toolMatch = norm.match(/"(?:TargetFile|Cwd|SearchPath|DirectoryPath|AbsolutePath|filePath)":\s*"([a-zA-Z]:\/[^"\r\n]+)"/);
-                if (toolMatch) {
-                    const found = extractFromPath(toolMatch[1]);
-                    if (found) return found;
-                }
+                        // Check Workspace mapping in <user_information> (e.g. d:\CM\optimus -> Ritiky23/optimus)
+                        const mWs = content.match(/([a-zA-Z]:[\\/][^\r\n\t\s<>]+)\s*->/);
+                        if (mWs) {
+                            const found = extractFromPath(mWs[1].trim());
+                            if (found) return found;
+                        }
 
-                // Command line paths inside JSON lines
-                const cmdMatch = norm.match(/(?:-Path|cd|dir|ls|--cwd)\s+([a-zA-Z]:\/[^\s"\r\n]+)/i);
-                if (cmdMatch) {
-                    const found = extractFromPath(cmdMatch[1]);
-                    if (found) return found;
-                }
+                        // Check Other open documents list
+                        const mOther = content.match(/-\s*([a-zA-Z]:[\\/][^\r\n\t\s()]+\.[a-zA-Z0-9]+)/);
+                        if (mOther) {
+                            const found = extractFromPath(mOther[1].trim());
+                            if (found) return found;
+                        }
+                    }
+                } catch (_) {}
             }
         }
 
-        return defaultName || "General";
+        // 3. Third priority: Check assistant answers and clean user requests (NEVER check entire ADDITIONAL_METADATA)
+        if (Array.isArray(lines) && lines.length > 0) {
+            for (let i = 0; i < lines.length; i++) {
+                try {
+                    const obj = JSON.parse(lines[i]);
+                    // Check tool calls inside line if present
+                    if (obj.tool_calls && Array.isArray(obj.tool_calls)) {
+                        for (const tc of obj.tool_calls) {
+                            const args = tc.args || tc.parameters || {};
+                            for (const k of Object.keys(args)) {
+                                if (typeof args[k] === 'string') {
+                                    const found = extractFromPath(args[k]);
+                                    if (found) return found;
+                                }
+                            }
+                        }
+                    }
+                    // Check clean user prompt or planner response content
+                    if (obj.type === 'USER_INPUT' && obj.content) {
+                        const cleanP = this.cleanPrompt(obj.content);
+                        const found = extractFromPath(cleanP);
+                        if (found) return found;
+                    } else if (obj.type === 'PLANNER_RESPONSE' && obj.content) {
+                        const cleanA = this.cleanAnswer(obj.content);
+                        const found = extractFromPath(cleanA);
+                        if (found) return found;
+                    }
+                } catch (_) {}
+            }
+        }
+
+        if (defaultName && defaultName !== 'General' && defaultName !== 'Default Project') {
+            return defaultName === 'memlite-extension' ? 'memlite' : defaultName;
+        }
+
+        return "General";
     }
 
     public stop() {

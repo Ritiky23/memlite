@@ -2,7 +2,7 @@
     "name": "memlite-extension",
     "displayName": "MemLite — Local AI Memory & Context Recovery Hub",
     "description": "Offline-first memory engine and tiered context recovery system for AI coding assistants.",
-    "version": "2.0.1",
+    "version": "2.0.2",
     "publisher": "memlite",
     "icon": "media/logo.png",
 

@@ -2,19 +2,15 @@
 
 All notable changes to the **MemLite** extension are documented in this file.
 
-## [2.0.3] - 2026-09-18
+## [2.0.2] - 2026-09-21
 
-- **Latest-First Session & Timeline Ordering**: Session Threads, Timeline Stream, and Recovery Deck columns now present the newest sessions and latest conversation steps at the top for instant accessibility.
-- **Referenced & Modified Files Chips**: Fixed empty file drawer display by combining structured `filesTouched` with automatic regex backfilling from historical responses, rendering clean file badges with icons and tooltips.
-- **Dynamic File Chip Drawer**: Automatically hides or displays file sections depending on file context availability.
-
-## [2.0.2] - 2026-09-18
-
-- **Full Multi-File Turn Aggregation**: Aggregates all file modifications, creations, multi-chunk diffs, and executed commands across all intermediate steps within a turn into consolidated memories.
-- **Direct AI Chatbox Staging**: Clicking *Rehydrate Agent* or *Pass Context* now automatically stages and pre-fills the prompt into the active Copilot/Gemini chat input box.
-- **Context Loop Prevention**: Automatically strips injected context blocks (`--- MEMLITE CONTEXT ---`, `Selected Reference Q&A`, and recovery capsules) from user requests to prevent recursive prompt pollution.
-- **Cross-Platform Home Directory Resolution**: Uses `os.homedir()` for reliable brain directory lookup across Windows, macOS, and Linux.
-- **Path-Normalized File Freshness Verification**: Normalizes file path keys with case-insensitivity to prevent false-positive stale alerts on Windows.
+### Multi-Window Project Scoping & Robust Workspace Isolation
+- **Multi-Window Anti-Pollution Watcher**: Resolved cross-window session overwriting when multiple Antigravity IDE instances (e.g., `optimus`, `client`, `memlite`) run simultaneously.
+- **Deep Metadata Workspace Detection**: Prioritizes file paths from tool actions (`Cwd`, `TargetFile`), active document URIs, and `<user_information>` workspace mappings from transcript lines before falling back to window focus state.
+- **Auto-Scoped Timeline Filter**: Each IDE window's Timeline automatically defaults its filter to the active workspace project without hiding the global cross-project view (`All Projects`).
+- **Inline Session & Project Renaming**: Double-click or click the edit icon on any session header or project pill in the Timeline to rename sessions and re-tag projects inline with optimistic UI updates.
+- **Accurate Historical Session Timestamps**: Restored true relative timestamps (`2h ago`, `1d ago`) by reading original `created_at` records across IDE restarts instead of resetting to `"Just now"`.
+- **Causal File Timeline & Deck Fixes**: Fixed rendering glitches in the Context Recovery Deck file actions column and improved diff preview formatting.
 
 ## [2.0.1] - 2026-09-14
 

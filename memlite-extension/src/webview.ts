@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { MemoryDatabase } from './database';
-import { stageContextToChat } from './extension';
+import { stageContextToChat, getCurrentWorkspaceProject } from './extension';
 
 export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'memlite-graph-view';
@@ -56,7 +56,7 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
                     this._db.addRecord(
                         message.question,
                         message.answer || '',
-                        message.project || 'memlite',
+                        message.project || 'General',
                         message.fileRef,
                         message.tags || [],
                         message.conversationId || `manual_${Date.now()}`,
@@ -123,7 +123,8 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
             const data = this._db.getGraphData();
             this._view.webview.postMessage({
                 type: 'updateGraph',
-                data: data
+                data: data,
+                currentProject: getCurrentWorkspaceProject()
             });
         }
     }

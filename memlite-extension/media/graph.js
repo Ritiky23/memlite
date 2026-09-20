@@ -46,6 +46,7 @@
     let collapsedSessionIds = new Set();
     let hasInitializedCollapse = false;
     let selectedProjectFilter = 'ALL';
+    let userHasManuallyChangedFilter = false;
 
     // DOM Elements - Sliding Detail Drawer
     const detailPanel = document.getElementById('detail-panel');
@@ -240,11 +241,13 @@
             }
         });
 
-        // Include explicit cognitive relationships
+        // Include explicit cognitive relationships using O(1) map lookup
+        const visibleNodeMap = new Map();
+        visibleNodes.forEach(n => visibleNodeMap.set(n.id, n));
         (rawLinks || []).forEach(l => {
             if (['session_member', 'next_question'].includes(l.type)) return;
-            const src = visibleNodes.find(n => n.id === l.source);
-            const tgt = visibleNodes.find(n => n.id === l.target);
+            const src = visibleNodeMap.get(l.source);
+            const tgt = visibleNodeMap.get(l.target);
             if (src && tgt) {
                 visibleLinks.push({
                     source: src.id,
@@ -863,26 +866,75 @@
             }
         });
 
+        const sessionNodeMap = new Map();
+        rawNodes.forEach(n => {
+            if (n.type === 'chat_session') {
+                const cId = (n.details && n.details.conversationId) || n.id.replace('chat_', '');
+                sessionNodeMap.set(cId, n);
+            }
+        });
+
         const activeSessions = Object.keys(conversations);
 
-        // Calculate session counts per project
-        const projectCounts = {};
+        // Calculate session counts and latest timestamps per project
+        const projectStats = {};
+        const projectBlacklist = new Set([
+            'c', 'd', 'e', 'cm', 'users', 'lenovo', 'appdata', 'local', 'programs', 'microsoft',
+            'windows', 'antigravity-ide', 'antigravity', 'gemini', 'brain', 'system_generated',
+            'logs', '.system_generated', 'scratch', 'dashboard', 'audit', 'botconfigs', 'build',
+            'out', 'dist', 'node_modules', 'public', 'src', 'components', 'hooks', 'pages', 'tests',
+            'media', 'temp', 'tmp', 'general', 'default project', 'workspace', 'home'
+        ]);
+
         activeSessions.forEach(cId => {
             const rawItems = conversations[cId] || [];
             const firstStep = rawItems[0];
-            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const sessionNode = sessionNodeMap.get(cId);
             const proj = (sessionNode && sessionNode.details && sessionNode.details.project) || (firstStep && firstStep.details && firstStep.details.project) || 'General';
-            projectCounts[proj] = (projectCounts[proj] || 0) + 1;
+            
+            if (!proj || proj.length <= 1 || projectBlacklist.has(proj.toLowerCase()) || proj === 'General' || proj === 'Default Project' || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(proj)) {
+                return;
+            }
+
+            const timestamp = (sessionNode && sessionNode.details && sessionNode.details.timestamp) || 
+                              (firstStep && firstStep.details && firstStep.details.timestamp) || '';
+
+            if (!projectStats[proj]) {
+                projectStats[proj] = { count: 0, latestTimestamp: timestamp };
+            }
+            projectStats[proj].count++;
+            if (timestamp > projectStats[proj].latestTimestamp) {
+                projectStats[proj].latestTimestamp = timestamp;
+            }
         });
+
+        // Sort projects by latest activity timestamp descending (most recent first)
+        const sortedProjects = Object.keys(projectStats).sort((a, b) => {
+            const timeA = projectStats[a].latestTimestamp || '';
+            const timeB = projectStats[b].latestTimestamp || '';
+            return timeB.localeCompare(timeA);
+        });
+
+        // Show strictly the top 10 recent projects based on time
+        const top10Projects = sortedProjects.slice(0, 10);
 
         // Populate Project Filter Dropdown
         if (timelineProjectFilter) {
-            const projects = Object.keys(projectCounts).sort();
             const currentFilter = selectedProjectFilter;
-            timelineProjectFilter.innerHTML = `<option value="ALL">📁 All Projects (${activeSessions.length})</option>` +
-                projects.map(p => `<option value="${escapeHtml(p)}" ${currentFilter === p ? 'selected' : ''}>📁 ${escapeHtml(p)} (${projectCounts[p]})</option>`).join('');
+            let optionsHtml = `<option value="ALL">📁 All Projects (${activeSessions.length})</option>`;
             
-            if (currentFilter !== 'ALL' && !projectCounts[currentFilter]) {
+            top10Projects.forEach(p => {
+                const isSelected = currentFilter === p ? 'selected' : '';
+                optionsHtml += `<option value="${escapeHtml(p)}" ${isSelected}>📁 ${escapeHtml(p)} (${projectStats[p].count})</option>`;
+            });
+
+            if (currentFilter !== 'ALL' && !top10Projects.includes(currentFilter) && projectStats[currentFilter]) {
+                optionsHtml += `<option value="${escapeHtml(currentFilter)}" selected>📁 ${escapeHtml(currentFilter)} (${projectStats[currentFilter].count})</option>`;
+            }
+
+            timelineProjectFilter.innerHTML = optionsHtml;
+            
+            if (currentFilter !== 'ALL' && !projectStats[currentFilter]) {
                 selectedProjectFilter = 'ALL';
                 timelineProjectFilter.value = 'ALL';
             }
@@ -893,7 +945,7 @@
             if (selectedProjectFilter === 'ALL') return true;
             const rawItems = conversations[cId] || [];
             const firstStep = rawItems[0];
-            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const sessionNode = sessionNodeMap.get(cId);
             const proj = (sessionNode && sessionNode.details && sessionNode.details.project) || (firstStep && firstStep.details && firstStep.details.project) || 'General';
             return proj === selectedProjectFilter;
         });
@@ -923,7 +975,7 @@
 
         displayedSessionIds.forEach((cId) => {
             const sIdx = activeSessions.indexOf(cId);
-            const sessionNode = rawNodes.find(n => n.id === `chat_${cId}` || (n.type === 'chat_session' && n.id.includes(cId)));
+            const sessionNode = sessionNodeMap.get(cId);
             
             const rawItems = conversations[cId] || [];
             const firstStep = rawItems[0];
@@ -1013,6 +1065,16 @@
                     ev.stopPropagation();
                     const newTitle = input.value.trim();
                     const newProject = projInput ? projInput.value.trim() : undefined;
+                    
+                    // Optimistically update rawNodes
+                    if (sessionNode && sessionNode.details) {
+                        if (newTitle) sessionNode.details.customTitle = newTitle;
+                        if (newProject) sessionNode.details.project = newProject;
+                    }
+                    rawItems.forEach(n => {
+                        if (newProject && n.details) n.details.project = newProject;
+                    });
+
                     if (vscode) {
                         vscode.postMessage({
                             type: 'renameSession',
@@ -1021,6 +1083,7 @@
                             newProject: newProject
                         });
                     }
+                    renderTimeline();
                 });
 
                 cancelBtn.addEventListener('click', (ev) => {
@@ -1034,11 +1097,24 @@
                         renderTimeline();
                     }
                 });
+                if (projInput) {
+                    projInput.addEventListener('keydown', (ev) => {
+                        if (ev.key === 'Escape') {
+                            ev.stopPropagation();
+                            renderTimeline();
+                        }
+                    });
+                }
             };
 
             if (editBtn) editBtn.addEventListener('click', startEditing);
             const titleText = header.querySelector('.session-title-text');
             if (titleText) titleText.addEventListener('dblclick', startEditing);
+            const projectPill = header.querySelector('.session-project-pill');
+            if (projectPill) {
+                projectPill.style.cursor = 'pointer';
+                projectPill.addEventListener('click', startEditing);
+            }
 
             groupDiv.appendChild(header);
 
@@ -1111,6 +1187,7 @@
     if (timelineProjectFilter) {
         timelineProjectFilter.addEventListener('change', (e) => {
             selectedProjectFilter = e.target.value;
+            userHasManuallyChangedFilter = true;
             renderTimeline();
         });
     }
@@ -1175,22 +1252,26 @@
         if (rawFileActions.length === 0) {
             colCardsFiles.innerHTML = `
                 <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
-                    No file modifications tracked yet.
+                    No recent file actions recorded.<br>
+                    <span style="font-size: 10px; opacity: 0.8;">Actions like created, edited, and diffed files will stream here automatically.</span>
                 </div>
             `;
         } else {
-            // Paginated file modifications
-            const recentFiles = rawFileActions.slice(-fileDeckLimit).reverse();
-            recentFiles.forEach(fa => {
+            const displayedActions = rawFileActions.slice(0, fileDeckLimit);
+            displayedActions.forEach((fa) => {
                 const card = document.createElement('div');
                 card.className = 'deck-card file-card';
+                card.addEventListener('click', () => {
+                    const matchedNode = rawNodes.find(n => n.type === 'file' && n.label.endsWith(pathBasename(fa.filePath)));
+                    if (matchedNode) {
+                        selectNode(matchedNode);
+                        setView('graph');
+                    }
+                });
 
-                const normPath = (fa.filePath || '').replace(/\\/g, '/');
-                const parts = normPath.split('/');
-                const fileName = parts.pop() || normPath;
-                const dirPath = parts.slice(-2).join('/');
-
-                const isLarge = fa.diffSummary && fa.diffSummary.startsWith('[LARGE DIFF');
+                const fileName = pathBasename(fa.filePath);
+                const dirPath = pathDirname(fa.filePath);
+                const isLarge = (fa.diffSummary || '').startsWith('[LARGE DIFF');
                 let diffBlock = '';
                 if (isLarge) {
                     diffBlock = `<div class="diff-breadcrumb-box">${escapeHtml(fa.diffSummary)}</div>`;
@@ -1263,7 +1344,9 @@
                     setView('graph');
                 });
 
-                const memberCount = rawLinks.filter(l => l.source === s.id && l.type === 'session_member').length;
+                const memberCount = (s.details && s.details.stepCount !== undefined)
+                    ? s.details.stepCount
+                    : rawLinks.filter(l => l.source === s.id && l.type === 'session_member').length;
                 let title = (s.fullTitle || s.label || '').replace(/^💬\s*"/, '').replace(/"$/, '');
                 const proj = (s.details && s.details.project) || 'General';
                 const timeObj = formatSessionDate(s.details && s.details.timestamp);
@@ -1464,6 +1547,10 @@
             rawLinks = msg.data.links || [];
             rawInvariants = msg.data.invariants || [];
             rawFileActions = msg.data.fileActions || [];
+
+            if (msg.currentProject && !userHasManuallyChangedFilter) {
+                selectedProjectFilter = msg.currentProject;
+            }
             
             const qaCount = rawNodes.filter(n => n.type === 'qa').length;
             statMemoryCount.innerText = `${qaCount} items`;
