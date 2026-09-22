@@ -113,6 +113,25 @@ export class MemoryGraphWebviewProvider implements vscode.WebviewViewProvider {
                 case 'pruneForeign':
                     await vscode.commands.executeCommand('memlite.pruneForeignMemories');
                     break;
+                case 'openFile':
+                    if (message.filePath) {
+                        try {
+                            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                            let targetPath = message.filePath;
+                            if (!path.isAbsolute(targetPath) && root) {
+                                targetPath = path.join(root, targetPath);
+                            }
+                            if (fs.existsSync(targetPath)) {
+                                const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(targetPath));
+                                await vscode.window.showTextDocument(doc, { preview: true });
+                            } else {
+                                vscode.window.showWarningMessage(`MemLite: File not found: ${message.filePath}`);
+                            }
+                        } catch (e) {
+                            vscode.window.showErrorMessage(`MemLite: Failed to open file: ${e}`);
+                        }
+                    }
+                    break;
             }
         });
     }

@@ -10,7 +10,6 @@
     const viewBoard = document.getElementById('view-board');
     const statMemoryCount = document.getElementById('stat-memory-count');
     const pillCartCount = document.getElementById('pill-cart-count');
-    const filterPills = document.querySelectorAll('.filter-pill');
 
     // DOM Elements - Search
     const searchInput = document.getElementById('search-input');
@@ -42,6 +41,7 @@
     const btnAddInvariantCol = document.getElementById('btn-add-invariant-col');
     const btnRehydrateCol = document.getElementById('btn-rehydrate-col');
     const btnRehydrateHeader = document.getElementById('btn-rehydrate-header');
+    const btnPruneHeader = document.getElementById('btn-prune-header');
 
     let collapsedSessionIds = new Set();
     let hasInitializedCollapse = false;
@@ -71,7 +71,6 @@
     const btnToggleCartDrawer = document.getElementById('btn-toggle-cart-drawer');
     const btnSyncWorkspace = document.getElementById('btn-sync-workspace');
     const btnCopyCart = document.getElementById('btn-copy-cart');
-    const btnPruneHeader = document.getElementById('btn-prune-header');
     const tooltip = document.getElementById('graph-tooltip');
 
     // DOM Elements - Add Invariant Modal
@@ -84,8 +83,7 @@
     const inputInvariantScope = document.getElementById('input-invariant-scope');
 
     // State Variables
-    let currentView = 'board'; // 'graph' | 'timeline' | 'board'
-    let activeCategoryFilter = 'ALL';
+    let currentView = 'board'; // 'board' | 'timeline' | 'graph'
     let rawNodes = [];
     let rawLinks = [];
     let rawInvariants = [];
@@ -95,7 +93,6 @@
     let transform = { x: 50, y: 60, k: 0.95 };
     let hoverNode = null;
     let selectedNode = null;
-    let searchHighlightIds = new Set();
     let collapsedConversationIds = new Set();
     let pinnedNodeIds = new Set();
     let isPanning = false;
@@ -104,7 +101,52 @@
     let fileDeckLimit = 30;
     let timelineSessionLimit = 5;
 
-    // Visual configurations
+    // Toast Notification System
+    function showToast(message, icon = '⚡') {
+        const toastContainer = document.getElementById('toast-container');
+        if (!toastContainer) return;
+        const toast = document.createElement('div');
+        toast.className = 'toast-item';
+        toast.innerHTML = `<span style="font-size: 13px;">${icon}</span><span>${escapeHtml(message)}</span>`;
+        toastContainer.appendChild(toast);
+        setTimeout(() => {
+            toast.classList.add('toast-fade-out');
+            setTimeout(() => toast.remove(), 220);
+        }, 2500);
+    }
+
+    // Helper: Path Basename & Dirname
+    function pathBasename(p) {
+        if (!p) return '';
+        const norm = p.replace(/\\/g, '/');
+        const parts = norm.split('/').filter(Boolean);
+        return parts.length > 0 ? parts[parts.length - 1] : norm;
+    }
+
+    function pathDirname(p) {
+        if (!p) return '';
+        const norm = p.replace(/\\/g, '/');
+        const idx = norm.lastIndexOf('/');
+        return idx !== -1 ? norm.substring(0, idx) : '';
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    // Global file open helper
+    window.openFileInEditor = function(filePath) {
+        if (vscode && filePath) {
+            vscode.postMessage({ type: 'openFile', filePath: filePath });
+        }
+    };
+
+    // Card-Based Mind Map Visual Configuration
     const NODE_COLORS = {
         Decision: '#00f0ff',
         Code: '#10b981',
@@ -115,16 +157,17 @@
     };
 
     const CARD_CONFIG = {
-        qaWidth: 155,
-        qaHeight: 52,
-        hubWidth: 130,
-        hubHeight: 48,
+        qaWidth: 160,
+        qaHeight: 54,
+        hubWidth: 135,
+        hubHeight: 50,
         stepGapX: 35,
         laneGapY: 85
     };
 
     // Canvas Resize Handler
     function resizeCanvas() {
+        if (!container) return;
         const dpr = window.devicePixelRatio || 1;
         const rect = container.getBoundingClientRect();
         canvas.width = rect.width * dpr;
@@ -135,53 +178,40 @@
     }
     window.addEventListener('resize', resizeCanvas);
 
-    // Filter Node Matcher
-    function isNodeMatchingFilters(node) {
-        // Category Filter
-        if (activeCategoryFilter === 'PINNED') {
-            if (!pinnedNodeIds.has(node.id)) return false;
-        } else if (activeCategoryFilter !== 'ALL') {
-            if (node.type === 'qa' && node.category !== activeCategoryFilter) return false;
-        }
+    // Search Matching Routine
+    function isNodeMatchingSearch(node) {
+        const query = (searchInput.value || '').toLowerCase().trim();
+        if (query.length < 2) return true;
 
-        // Search Filter
-        const query = searchInput.value.toLowerCase().trim();
-        if (query.length >= 2) {
-            const tokens = query.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
-            const labelText = (node.label || '').toLowerCase();
-            const fullTitle = (node.fullTitle || '').toLowerCase();
-            const questionText = (node.details && node.details.question) ? node.details.question.toLowerCase() : '';
-            const answerText = (node.details && node.details.answer) ? node.details.answer.toLowerCase() : '';
-            const tagsText = (node.details && node.details.tags) ? node.details.tags.join(' ').toLowerCase() : '';
+        const tokens = query.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
+        const labelText = (node.label || '').toLowerCase();
+        const fullTitle = (node.fullTitle || '').toLowerCase();
+        const questionText = (node.details && node.details.question) ? node.details.question.toLowerCase() : '';
+        const answerText = (node.details && node.details.answer) ? node.details.answer.toLowerCase() : '';
+        const tagsText = (node.details && node.details.tags) ? node.details.tags.join(' ').toLowerCase() : '';
 
-            const combined = `${labelText} ${fullTitle} ${questionText} ${answerText} ${tagsText}`;
-            return combined.includes(query) || (tokens.length > 0 && tokens.some(t => combined.includes(t)));
-        }
-
-        return true;
+        const combined = `${labelText} ${fullTitle} ${questionText} ${answerText} ${tagsText}`;
+        return combined.includes(query) || (tokens.length > 0 && tokens.some(t => combined.includes(t)));
     }
 
-    // Card-Based Mind Map Layout (Compact Wrapping Tree)
+    // Mind Map Layout Calculation
     function calculateTreeLayout() {
         const conversations = {};
         const chatSessionNodes = {};
         
         rawNodes.forEach(node => {
             if (node.type === 'chat_session') {
-                const cId = node.id.replace('chat_', '');
+                const cId = (node.details && node.details.conversationId) || node.id.replace('chat_', '');
                 chatSessionNodes[cId] = node;
             } else if (node.type === 'qa' && node.details) {
                 const cId = node.details.conversationId;
-                if (!conversations[cId]) {
-                    conversations[cId] = [];
-                }
+                if (!conversations[cId]) conversations[cId] = [];
                 conversations[cId].push(node);
             }
         });
 
         const activeSessions = Object.keys(chatSessionNodes);
         
-        // Performance guard: collapse older sessions by default if more than 5 exist
         if (collapsedConversationIds.size === 0 && activeSessions.length > 5) {
             activeSessions.slice(0, activeSessions.length - 5).forEach(cId => {
                 collapsedConversationIds.add(cId);
@@ -198,7 +228,6 @@
             const sessionNode = chatSessionNodes[cId];
             const children = conversations[cId] || [];
             
-            // Session Hub position
             sessionNode.x = startX;
             sessionNode.y = currentY;
             sessionNode.w = CARD_CONFIG.hubWidth;
@@ -209,7 +238,7 @@
             if (!isCollapsed) {
                 children.sort((a, b) => (a.details.stepIndex ?? 0) - (b.details.stepIndex ?? 0));
 
-                const maxCols = 4; // Max 4 steps per row, then wraps
+                const maxCols = 4;
                 let laneRows = 1;
 
                 children.forEach((qaNode, idx) => {
@@ -223,7 +252,6 @@
                     qaNode.y = currentY + rowIndex * (CARD_CONFIG.qaHeight + 25);
                     visibleNodes.push(qaNode);
 
-                    // Connect link from previous step
                     const prevNode = idx === 0 ? sessionNode : children[idx - 1];
                     visibleLinks.push({
                         source: prevNode.id,
@@ -241,7 +269,6 @@
             }
         });
 
-        // Include explicit cognitive relationships using O(1) map lookup
         const visibleNodeMap = new Map();
         visibleNodes.forEach(n => visibleNodeMap.set(n.id, n));
         (rawLinks || []).forEach(l => {
@@ -268,6 +295,7 @@
 
     // Canvas Draw Routine
     function draw() {
+        if (!canvas || currentView !== 'graph') return;
         const rect = canvas.getBoundingClientRect();
         ctx.clearRect(0, 0, rect.width, rect.height);
 
@@ -275,7 +303,7 @@
         ctx.translate(transform.x, transform.y);
         ctx.scale(transform.k, transform.k);
 
-        const hasActiveSearch = searchInput.value.trim().length >= 2;
+        const hasActiveSearch = (searchInput.value || '').trim().length >= 2;
 
         // 1. Draw Links
         visibleLinks.forEach(link => {
@@ -283,8 +311,8 @@
             const tgtNode = visibleNodes.find(n => n.id === link.target);
             if (!srcNode || !tgtNode) return;
 
-            const isSrcMatch = isNodeMatchingFilters(srcNode);
-            const isTgtMatch = isNodeMatchingFilters(tgtNode);
+            const isSrcMatch = isNodeMatchingSearch(srcNode);
+            const isTgtMatch = isNodeMatchingSearch(tgtNode);
             const isMatch = isSrcMatch && isTgtMatch;
             const isCognitive = link.type && !['session_member', 'next_question'].includes(link.type);
 
@@ -304,14 +332,13 @@
                 else ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
                 ctx.lineWidth = 1.6;
             } else {
-                ctx.strokeStyle = isMatch ? 'rgba(0, 240, 255, 0.4)' : 'rgba(255, 255, 255, 0.08)';
+                ctx.strokeStyle = isMatch ? 'rgba(56, 189, 248, 0.5)' : 'rgba(255, 255, 255, 0.08)';
                 ctx.lineWidth = isMatch ? 2.0 : 1.4;
             }
 
-            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.08 : 0.8;
+            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.08 : 0.85;
             ctx.stroke();
 
-            // Draw badge for cognitive relations
             if (isCognitive) {
                 const midT_X = midX;
                 const midT_Y = (link.sourceY + link.targetY) / 2;
@@ -334,15 +361,15 @@
             ctx.restore();
         });
 
-        // 2. Draw Cards
+        // 2. Draw Node Cards
         visibleNodes.forEach(node => {
-            const isMatch = isNodeMatchingFilters(node);
+            const isMatch = isNodeMatchingSearch(node);
             const isSelected = selectedNode && selectedNode.id === node.id;
             const isHovered = hoverNode === node;
             const isPinned = pinnedNodeIds.has(node.id);
 
             ctx.save();
-            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.12 : (isMatch ? 1.0 : 0.35);
+            ctx.globalAlpha = hasActiveSearch && !isMatch ? 0.12 : (isMatch ? 1.0 : 0.4);
 
             const x = node.x;
             const y = node.y;
@@ -351,76 +378,65 @@
             const radius = 6;
             const catColor = NODE_COLORS[node.category] || NODE_COLORS['General'];
 
-            // Card Glow on Hover or Match
             if (isMatch && hasActiveSearch) {
-                ctx.shadowColor = 'rgba(0, 240, 255, 0.4)';
+                ctx.shadowColor = 'rgba(56, 189, 248, 0.5)';
                 ctx.shadowBlur = 12;
             } else if (isSelected || isHovered) {
-                ctx.shadowColor = 'rgba(0, 240, 255, 0.25)';
+                ctx.shadowColor = 'rgba(56, 189, 248, 0.3)';
                 ctx.shadowBlur = 8;
             }
 
-            // Card Background Glass Fill
             ctx.beginPath();
             ctx.roundRect(x, y, w, h, radius);
-            ctx.fillStyle = isSelected ? 'rgba(30, 41, 59, 0.95)' : (isHovered ? 'rgba(20, 30, 48, 0.9)' : 'rgba(15, 23, 42, 0.82)');
+            ctx.fillStyle = isSelected ? 'rgba(30, 41, 59, 0.96)' : (isHovered ? 'rgba(23, 31, 46, 0.92)' : 'rgba(15, 20, 32, 0.88)');
             ctx.fill();
 
-            // Card Border
-            ctx.strokeStyle = isSelected ? '#00f0ff' : (isPinned ? '#d600ff' : (isHovered ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.07)'));
-            ctx.lineWidth = isSelected || isPinned ? 1.6 : 1;
+            ctx.strokeStyle = isSelected ? '#38bdf8' : (isPinned ? '#a855f7' : (isHovered ? 'rgba(255, 255, 255, 0.25)' : 'rgba(255, 255, 255, 0.08)'));
+            ctx.lineWidth = isSelected || isPinned ? 1.8 : 1;
             ctx.stroke();
 
-            // Reset Shadow
             ctx.shadowBlur = 0;
 
             if (node.type === 'chat_session') {
-                // Left category indicator bar
-                ctx.fillStyle = '#00ff66';
+                ctx.fillStyle = '#38bdf8';
                 ctx.beginPath();
                 ctx.roundRect(x + 2, y + 2, 4, h - 4, [radius, 0, 0, radius]);
                 ctx.fill();
 
-                // Chat session title
-                ctx.fillStyle = '#f1f5f9';
+                ctx.fillStyle = '#f8fafc';
                 ctx.font = 'bold 11px sans-serif';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
                 ctx.fillText(node.label, x + 14, y + 10);
 
-                ctx.fillStyle = '#64748b';
+                ctx.fillStyle = '#94a3b8';
                 ctx.font = '10px sans-serif';
                 const subtitle = (node.fullTitle || 'Chat Session').replace(/^💬\s*"/, '').replace(/"$/, '');
-                const truncatedSub = subtitle.length > 14 ? subtitle.substring(0, 13) + '...' : subtitle;
+                const truncatedSub = subtitle.length > 15 ? subtitle.substring(0, 14) + '...' : subtitle;
                 ctx.fillText(truncatedSub, x + 14, y + 26);
 
-                // Collapse +/- bubble
-                const cId = node.id.replace('chat_', '');
+                const cId = (node.details && node.details.conversationId) || node.id.replace('chat_', '');
                 const isCollapsed = collapsedConversationIds.has(cId);
                 ctx.fillStyle = '#1e293b';
                 ctx.beginPath();
                 ctx.arc(x + w - 12, y + 14, 7, 0, Math.PI * 2);
                 ctx.fill();
-                ctx.strokeStyle = '#00ff66';
+                ctx.strokeStyle = '#38bdf8';
                 ctx.lineWidth = 1;
                 ctx.stroke();
 
-                ctx.fillStyle = '#00ff66';
+                ctx.fillStyle = '#38bdf8';
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText(isCollapsed ? '+' : '−', x + w - 12, y + 14);
-
             } else {
-                // Q&A Node Card
-                // Left category indicator bar
                 ctx.fillStyle = catColor;
                 ctx.beginPath();
                 ctx.roundRect(x + 2, y + 2, 3, h - 4, [radius, 0, 0, radius]);
                 ctx.fill();
 
-                // Step & Category Pill Header
-                ctx.fillStyle = '#64748b';
+                ctx.fillStyle = '#94a3b8';
                 ctx.font = 'bold 9px sans-serif';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
@@ -429,30 +445,27 @@
                 ctx.fillStyle = catColor;
                 ctx.textAlign = 'right';
                 ctx.font = '8px sans-serif';
-                ctx.fillText(node.category.toUpperCase(), x + w - 8, y + 8);
+                ctx.fillText((node.category || 'QA').toUpperCase(), x + w - 8, y + 8);
 
-                // Question Title (truncated)
                 ctx.fillStyle = isSelected ? '#ffffff' : '#e2e8f0';
                 ctx.font = '10px sans-serif';
                 ctx.textAlign = 'left';
                 const qText = (node.details && node.details.question) ? node.details.question : 'Q&A Step';
                 const cleanQ = qText.replace(/\n/g, ' ').trim();
-                const truncatedQ = cleanQ.length > 21 ? cleanQ.substring(0, 19) + '...' : cleanQ;
-                ctx.fillText(truncatedQ, x + 10, y + 22);
+                const truncatedQ = cleanQ.length > 22 ? cleanQ.substring(0, 20) + '...' : cleanQ;
+                ctx.fillText(truncatedQ, x + 10, y + 23);
 
-                // Tags Preview Footer
                 if (node.details && node.details.tags && node.details.tags.length > 0) {
                     ctx.fillStyle = '#64748b';
                     ctx.font = '8px sans-serif';
                     const tagStr = '#' + node.details.tags.slice(0, 2).join(' #');
-                    ctx.fillText(tagStr, x + 10, y + 36);
+                    ctx.fillText(tagStr, x + 10, y + 38);
                 }
 
-                // Pinned Cart Indicator
                 if (isPinned) {
-                    ctx.fillStyle = '#d600ff';
+                    ctx.fillStyle = '#a855f7';
                     ctx.beginPath();
-                    ctx.arc(x + w - 8, y + h - 8, 3, 0, Math.PI * 2);
+                    ctx.arc(x + w - 8, y + h - 8, 3.5, 0, Math.PI * 2);
                     ctx.fill();
                 }
             }
@@ -483,7 +496,7 @@
 
         if (clickedNode) {
             if (clickedNode.type === 'chat_session') {
-                const convId = clickedNode.id.replace('chat_', '');
+                const convId = (clickedNode.details && clickedNode.details.conversationId) || clickedNode.id.replace('chat_', '');
                 if (collapsedConversationIds.has(convId)) {
                     collapsedConversationIds.delete(convId);
                 } else {
@@ -522,19 +535,16 @@
 
         if (hoverNode) {
             if (hoverNode.type === 'chat_session') {
-                tooltip.innerHTML = `<strong>Chat Session</strong><br/>${hoverNode.fullTitle || hoverNode.label}`;
+                tooltip.innerHTML = `<strong>Chat Session</strong><br/>${escapeHtml(hoverNode.fullTitle || hoverNode.label)}`;
             } else {
                 const titleText = hoverNode.details && hoverNode.details.question ? hoverNode.details.question : 'Q&A Step';
-                const cleanText = titleText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                tooltip.innerHTML = `<strong>${hoverNode.label} [${hoverNode.category}]</strong><br/>${cleanText}`;
+                tooltip.innerHTML = `<strong>${escapeHtml(hoverNode.label)} [${escapeHtml(hoverNode.category)}]</strong><br/>${escapeHtml(titleText)}`;
             }
             tooltip.style.left = `${e.clientX + 14}px`;
             tooltip.style.top = `${e.clientY + 14}px`;
             tooltip.classList.remove('hidden');
-            tooltip.classList.add('visible');
         } else {
             tooltip.classList.add('hidden');
-            tooltip.classList.remove('visible');
         }
     });
 
@@ -554,7 +564,7 @@
         draw();
     });
 
-    // Zoom Helpers
+    // Zoom Controls
     btnZoomIn.addEventListener('click', () => {
         transform.k = Math.min(transform.k * 1.25, 3);
         draw();
@@ -603,13 +613,13 @@
         draw();
         
         if (node.type === 'qa' && node.details) {
-            detailQuestion.innerText = node.details.question;
-            detailAnswer.innerText = node.details.answer;
-            nodeBadge.className = 'badge qa';
+            detailQuestion.innerText = node.details.question || '';
+            detailAnswer.innerText = node.details.answer || '';
+            nodeBadge.className = 'badge';
             nodeBadge.innerText = node.category || 'Q&A';
-            nodeProject.innerText = node.details.project || 'memlite';
+            nodeProject.innerText = node.details.project || 'General';
             
-            // Render Referenced & Modified Files
+            // Render Referenced & Modified Files with click-to-open
             const files = Array.isArray(node.details.filesTouched) ? node.details.filesTouched : [];
             const fileRef = node.details.fileRef;
             const allFiles = Array.from(new Set([...(fileRef ? [fileRef] : []), ...files])).filter(Boolean);
@@ -620,7 +630,7 @@
                 detailFile.innerHTML = allFiles.map(f => {
                     const norm = f.replace(/\\/g, '/');
                     const basename = norm.split('/').pop() || norm;
-                    return `<span class="file-chip" title="${escapeHtml(norm)}">
+                    return `<span class="file-chip" title="Click to open ${escapeHtml(norm)}" onclick="window.openFileInEditor('${escapeHtml(norm)}')">
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
                         <span>${escapeHtml(basename)}</span>
                     </span>`;
@@ -633,10 +643,10 @@
             const pinLabel = btnPin.querySelector('.btn-label');
             if (pinnedNodeIds.has(node.id)) {
                 btnPin.classList.add('pinned');
-                if (pinLabel) pinLabel.innerText = 'Pinned';
+                if (pinLabel) pinLabel.innerText = 'Staged';
             } else {
                 btnPin.classList.remove('pinned');
-                if (pinLabel) pinLabel.innerText = 'Pin to Cart';
+                if (pinLabel) pinLabel.innerText = 'Stage for Context';
             }
             btnPin.style.display = 'inline-flex';
             btnContext.style.display = 'inline-flex';
@@ -645,9 +655,9 @@
         } else if (node.type === 'chat_session') {
             detailQuestion.innerText = node.fullTitle || node.label;
             detailAnswer.innerText = "This node represents a conversation session. Click to toggle its steps in the mind map.";
-            nodeBadge.className = 'badge project';
+            nodeBadge.className = 'badge';
             nodeBadge.innerText = 'Chat Session';
-            nodeProject.innerText = 'Workspace';
+            nodeProject.innerText = (node.details && node.details.project) || 'Workspace';
             detailFileSection.classList.add('hidden');
             detailFile.innerHTML = '';
             
@@ -682,7 +692,7 @@
         cartItemsList.innerHTML = '';
 
         if (count === 0) {
-            cartItemsList.innerHTML = '<li class="cart-item-empty">No items staged in context cart. Pin items from the canvas or recovery deck.</li>';
+            cartItemsList.innerHTML = '<li class="cart-item-empty">No items staged in context cart. Pin items from the Canvas, Timeline, or Recovery Deck.</li>';
             return;
         }
 
@@ -717,6 +727,7 @@
                 renderTimeline();
                 renderBoard();
                 if (selectedNode && selectedNode.id === id) selectNode(selectedNode);
+                showToast('Removed item from staged context', '🗑️');
             });
             li.appendChild(removeBtn);
             cartItemsList.appendChild(li);
@@ -729,12 +740,14 @@
         if (pinnedNodeIds.has(selectedNode.id)) {
             pinnedNodeIds.delete(selectedNode.id);
             btnPin.classList.remove('pinned');
-            if (pinLabel) pinLabel.innerText = 'Pin to Cart';
+            if (pinLabel) pinLabel.innerText = 'Stage for Context';
+            showToast('Unstaged item from cart', '📌');
         } else {
             pinnedNodeIds.add(selectedNode.id);
             btnPin.classList.add('pinned');
-            if (pinLabel) pinLabel.innerText = 'Pinned';
+            if (pinLabel) pinLabel.innerText = 'Staged';
             cartDrawer.classList.remove('collapsed');
+            showToast('Staged item to context cart', '⚡');
         }
         updateCartUI();
         draw();
@@ -764,6 +777,7 @@
             renderTimeline();
             renderBoard();
             if (selectedNode) selectNode(selectedNode);
+            showToast('Cleared all staged context items', '🧹');
         });
     }
 
@@ -772,19 +786,26 @@
     });
 
     btnSyncWorkspace.addEventListener('click', () => {
-        if (pinnedNodeIds.size === 0) return;
+        if (pinnedNodeIds.size === 0) {
+            showToast('Staged context cart is empty', '⚠️');
+            return;
+        }
         const items = Array.from(pinnedNodeIds).map(id => {
             const node = rawNodes.find(n => n.id === id);
             return { question: node.details.question, answer: node.details.answer };
         });
         if (vscode) {
             vscode.postMessage({ type: 'exportContextFile', items: items });
+            showToast('Rehydrating agent via .memlite_context.md', '⚡');
         }
     });
 
     btnCopyCart.addEventListener('click', () => {
-        if (pinnedNodeIds.size === 0) return;
-        let compiledMarkdown = `# 🧠 Compiled Chat Context\n\n`;
+        if (pinnedNodeIds.size === 0) {
+            showToast('Context cart is empty', '⚠️');
+            return;
+        }
+        let compiledMarkdown = `# 🧠 Compiled Chat Context Reference\n\n`;
         Array.from(pinnedNodeIds).forEach((id, index) => {
             const node = rawNodes.find(n => n.id === id);
             if (!node) return;
@@ -792,26 +813,16 @@
         });
         if (vscode) {
             vscode.postMessage({ type: 'copyClipboard', text: compiledMarkdown });
+            showToast('Copied context capsule to clipboard!', '📋');
         }
     });
 
     btnContext.addEventListener('click', () => {
         if (!selectedNode || selectedNode.type !== 'qa') return;
-        const connectedQAs = [];
-        const cId = selectedNode.details.conversationId;
-        rawNodes.forEach(node => {
-            if (node.type === 'qa' && node.id !== selectedNode.id && node.details && node.details.conversationId === cId) {
-                connectedQAs.push({ question: node.details.question, answer: node.details.answer });
-            }
-        });
+        const text = `${selectedNode.details.question}\n\n${selectedNode.details.answer}`;
         if (vscode) {
-            vscode.postMessage({
-                type: 'passContext',
-                nodeId: selectedNode.id,
-                text: selectedNode.details.question,
-                answer: selectedNode.details.answer,
-                connected: connectedQAs
-            });
+            vscode.postMessage({ type: 'copyClipboard', text: text });
+            showToast('Copied QA text to clipboard', '📋');
         }
     });
 
@@ -855,7 +866,7 @@
 
     // VIEW 2: Timeline Stream Rendering
     function renderTimeline() {
-        if (currentView !== 'timeline') return; // Performance: lazy render only when timeline is active
+        if (currentView !== 'timeline') return;
         timelineStream.innerHTML = '';
         const conversations = {};
         rawNodes.forEach(n => {
@@ -875,8 +886,6 @@
         });
 
         const activeSessions = Object.keys(conversations);
-
-        // Calculate session counts and latest timestamps per project
         const projectStats = {};
         const projectBlacklist = new Set([
             'c', 'd', 'e', 'cm', 'users', 'lenovo', 'appdata', 'local', 'programs', 'microsoft',
@@ -908,17 +917,14 @@
             }
         });
 
-        // Sort projects by latest activity timestamp descending (most recent first)
         const sortedProjects = Object.keys(projectStats).sort((a, b) => {
             const timeA = projectStats[a].latestTimestamp || '';
             const timeB = projectStats[b].latestTimestamp || '';
             return timeB.localeCompare(timeA);
         });
 
-        // Show strictly the top 10 recent projects based on time
         const top10Projects = sortedProjects.slice(0, 10);
 
-        // Populate Project Filter Dropdown
         if (timelineProjectFilter) {
             const currentFilter = selectedProjectFilter;
             let optionsHtml = `<option value="ALL">📁 All Projects (${activeSessions.length})</option>`;
@@ -940,7 +946,6 @@
             }
         }
 
-        // Filter sessions by selected project
         const filteredSessionIds = activeSessions.filter(cId => {
             if (selectedProjectFilter === 'ALL') return true;
             const rawItems = conversations[cId] || [];
@@ -958,11 +963,10 @@
         }
 
         if (filteredSessionIds.length === 0) {
-            timelineStream.innerHTML = '<div style="text-align: center; color: #64748b; padding: 40px 0;">No memories recorded for this project.</div>';
+            timelineStream.innerHTML = '<div class="deck-empty-state"><span class="deck-empty-icon">💬</span>No sessions found for this project filter.</div>';
             return;
         }
 
-        // Initialize default collapse state: keep first 2 sessions expanded, collapse older sessions if many
         if (!hasInitializedCollapse) {
             hasInitializedCollapse = true;
             if (activeSessions.length > 2) {
@@ -970,7 +974,6 @@
             }
         }
 
-        // Bounded rendering: show latest timelineSessionLimit sessions to keep DOM ultra-light
         const displayedSessionIds = filteredSessionIds.slice(0, timelineSessionLimit);
 
         displayedSessionIds.forEach((cId) => {
@@ -985,14 +988,11 @@
             const defaultLabel = `Session ${sessionNumber}`;
             const displayTitle = customTitle || defaultLabel;
             
-            // Latest timestamp
             const latestTs = (sessionNode && sessionNode.details && sessionNode.details.timestamp) || (rawItems.length > 0 ? rawItems[rawItems.length - 1].timestamp : '');
             const timeObj = formatSessionDate(latestTs);
 
             const isCollapsed = collapsedSessionIds.has(cId);
-
-            // Show latest steps at the top of the session
-            const items = rawItems.filter(n => isNodeMatchingFilters(n)).slice().reverse();
+            const items = rawItems.filter(n => isNodeMatchingSearch(n)).slice().reverse();
             if (items.length === 0) return;
 
             const groupDiv = document.createElement('div');
@@ -1011,7 +1011,7 @@
                     </span>
                     <span class="session-project-pill" title="Project: ${escapeHtml(project)}">📁 ${escapeHtml(project)}</span>
                     <div class="session-title-wrap" id="title-wrap-${cId}">
-                        <span class="session-title-text" title="Click edit icon or double-click to rename">${escapeHtml(displayTitle)}</span>
+                        <span class="session-title-text" title="Double click to rename">${escapeHtml(displayTitle)}</span>
                         <button class="session-edit-btn" title="Rename session & project" data-cid="${cId}">
                             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
                         </button>
@@ -1023,7 +1023,6 @@
                 </div>
             `;
 
-            // Toggle collapse when clicking header (except when clicking edit button or input)
             header.addEventListener('click', (e) => {
                 if (e.target.closest('.session-edit-btn') || e.target.closest('.session-edit-form')) {
                     return;
@@ -1066,7 +1065,6 @@
                     const newTitle = input.value.trim();
                     const newProject = projInput ? projInput.value.trim() : undefined;
                     
-                    // Optimistically update rawNodes
                     if (sessionNode && sessionNode.details) {
                         if (newTitle) sessionNode.details.customTitle = newTitle;
                         if (newProject) sessionNode.details.project = newProject;
@@ -1082,6 +1080,7 @@
                             newTitle: newTitle,
                             newProject: newProject
                         });
+                        showToast('Session updated', '✏️');
                     }
                     renderTimeline();
                 });
@@ -1090,35 +1089,14 @@
                     ev.stopPropagation();
                     renderTimeline();
                 });
-
-                input.addEventListener('keydown', (ev) => {
-                    if (ev.key === 'Escape') {
-                        ev.stopPropagation();
-                        renderTimeline();
-                    }
-                });
-                if (projInput) {
-                    projInput.addEventListener('keydown', (ev) => {
-                        if (ev.key === 'Escape') {
-                            ev.stopPropagation();
-                            renderTimeline();
-                        }
-                    });
-                }
             };
 
             if (editBtn) editBtn.addEventListener('click', startEditing);
             const titleText = header.querySelector('.session-title-text');
             if (titleText) titleText.addEventListener('dblclick', startEditing);
-            const projectPill = header.querySelector('.session-project-pill');
-            if (projectPill) {
-                projectPill.style.cursor = 'pointer';
-                projectPill.addEventListener('click', startEditing);
-            }
 
             groupDiv.appendChild(header);
 
-            // Session Body containing the step cards
             const bodyDiv = document.createElement('div');
             bodyDiv.className = 'timeline-session-body';
 
@@ -1132,8 +1110,8 @@
 
                 card.innerHTML = `
                     <div class="card-top">
-                        <span class="card-step-badge">${node.label}</span>
-                        <span class="badge" style="background: rgba(255,255,255,0.06); color: ${catColor}; border: 1px solid ${catColor}44;">${node.category}</span>
+                        <span class="card-step-badge">${escapeHtml(node.label)}</span>
+                        <span class="badge" style="color: ${catColor}; border-color: ${catColor}44;">${escapeHtml(node.category)}</span>
                     </div>
                     <div class="card-question">${escapeHtml(node.details.question)}</div>
                     <div class="card-answer">${escapeHtml(node.details.answer)}</div>
@@ -1142,7 +1120,7 @@
                             ${(node.details.tags || []).map(t => `<span class="tag-pill">#${escapeHtml(t)}</span>`).join('')}
                         </div>
                         <button class="action-btn" style="padding: 3px 8px; font-size: 10px;" onclick="event.stopPropagation(); window.togglePinNode('${node.id}')">
-                            ${isPinned ? '📌 Pinned' : '📌 Pin'}
+                            ${isPinned ? '📌 Staged' : '📌 Stage'}
                         </button>
                     </div>
                 `;
@@ -1156,8 +1134,8 @@
         if (activeSessions.length > timelineSessionLimit) {
             const moreSessionsDiv = document.createElement('div');
             moreSessionsDiv.style.textAlign = 'center';
-            moreSessionsDiv.style.padding = '16px 0';
-            moreSessionsDiv.innerHTML = `<button class="action-btn" id="btn-load-more-timeline" style="padding: 8px 16px; font-size: 11px;">Load Earlier Sessions (${activeSessions.length - timelineSessionLimit} remaining)</button>`;
+            moreSessionsDiv.style.padding = '12px 0';
+            moreSessionsDiv.innerHTML = `<button class="btn-action-ghost" id="btn-load-more-timeline" style="font-size: 11px;">Load Earlier Sessions (${activeSessions.length - timelineSessionLimit} remaining)</button>`;
             moreSessionsDiv.querySelector('#btn-load-more-timeline').addEventListener('click', () => {
                 timelineSessionLimit += 10;
                 renderTimeline();
@@ -1170,6 +1148,7 @@
         btnTimelineExpandAll.addEventListener('click', () => {
             collapsedSessionIds.clear();
             renderTimeline();
+            showToast('Expanded all sessions', '📂');
         });
     }
 
@@ -1181,6 +1160,7 @@
                 }
             });
             renderTimeline();
+            showToast('Collapsed all sessions', '📁');
         });
     }
 
@@ -1192,19 +1172,11 @@
         });
     }
 
-    // VIEW 3: Category Board Rendering
-    function escapeHtml(str) {
-        if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
-    // VIEW 3: Context Recovery Deck Rendering
+    // VIEW 1: Context Recovery Deck Rendering (4 Columns)
     function renderBoard() {
-        if (currentView !== 'board') return; // Performance: lazy render only when board is active
+        if (currentView !== 'board') return;
+
+        const hasSearch = (searchInput.value || '').trim().length >= 2;
 
         // 1. Column 1: Invariants & Rules (Tier 0)
         colCardsInvariants.innerHTML = '';
@@ -1213,9 +1185,10 @@
 
         if (activeInvariants.length === 0) {
             colCardsInvariants.innerHTML = `
-                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
-                    No active constraints.<br>
-                    <span style="font-size: 10px; opacity: 0.8;">Click "+ Rule" above to register an un-breakable Tier 0 rule.</span>
+                <div class="deck-empty-state">
+                    <span class="deck-empty-icon">🔒</span>
+                    <div>No active Tier 0 constraints.</div>
+                    <div class="deck-empty-hint">Click "+ Rule" above to register architectural decisions or negative constraints.</div>
                 </div>
             `;
         } else {
@@ -1231,14 +1204,14 @@
                 card.innerHTML = `
                     <div class="card-meta-row">
                         <span class="mono-badge">${escapeHtml(typeLabel)}</span>
-                        <button class="revoke-btn" onclick="event.stopPropagation(); window.revokeInvariant('${inv.id}')" title="Revoke rule to avoid prompt deadlocks">
+                        <button class="revoke-btn" onclick="event.stopPropagation(); window.revokeInvariant('${inv.id}')" title="Revoke rule to avoid deadlocks">
                             Revoke
                         </button>
                     </div>
                     <div class="invariant-content">${escapeHtml(inv.content)}</div>
                     <div class="card-sub-row">
                         ${scopeBadge}
-                        <span style="font-family: monospace; color: #475569;">id:${inv.id}</span>
+                        <span style="font-family: monospace; color: var(--text-faint);">id:${inv.id}</span>
                     </div>
                 `;
                 colCardsInvariants.appendChild(card);
@@ -1251,9 +1224,10 @@
 
         if (rawFileActions.length === 0) {
             colCardsFiles.innerHTML = `
-                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
-                    No recent file actions recorded.<br>
-                    <span style="font-size: 10px; opacity: 0.8;">Actions like created, edited, and diffed files will stream here automatically.</span>
+                <div class="deck-empty-state">
+                    <span class="deck-empty-icon">🛠️</span>
+                    <div>No file actions recorded yet.</div>
+                    <div class="deck-empty-hint">Created, modified, and diffed files from AI sessions stream here automatically.</div>
                 </div>
             `;
         } else {
@@ -1261,18 +1235,12 @@
             displayedActions.forEach((fa) => {
                 const card = document.createElement('div');
                 card.className = 'deck-card file-card';
-                card.addEventListener('click', () => {
-                    const matchedNode = rawNodes.find(n => n.type === 'file' && n.label.endsWith(pathBasename(fa.filePath)));
-                    if (matchedNode) {
-                        selectNode(matchedNode);
-                        setView('graph');
-                    }
-                });
-
+                
                 const fileName = pathBasename(fa.filePath);
                 const dirPath = pathDirname(fa.filePath);
                 const isLarge = (fa.diffSummary || '').startsWith('[LARGE DIFF');
                 let diffBlock = '';
+                
                 if (isLarge) {
                     diffBlock = `<div class="diff-breadcrumb-box">${escapeHtml(fa.diffSummary)}</div>`;
                 } else if (fa.diffSummary && fa.diffSummary.trim().length > 0) {
@@ -1284,7 +1252,7 @@
                         } else if (l.startsWith('-') && !l.startsWith('---')) {
                             return `<span style="color: #f87171;">${escaped}</span>`;
                         }
-                        return `<span style="color: #64748b;">${escaped}</span>`;
+                        return `<span style="color: #94a3b8;">${escaped}</span>`;
                     }).join('\n');
                     diffBlock = `<pre class="diff-preview-box">${styledLines}</pre>`;
                 }
@@ -1292,18 +1260,20 @@
                 card.innerHTML = `
                     <div class="card-meta-row">
                         <span class="step-pill">Step ${fa.stepIndex}</span>
-                        <span class="action-tag action-${fa.action}">${fa.action.toUpperCase()}</span>
+                        <span class="action-tag action-${fa.action}">${escapeHtml(fa.action)}</span>
                     </div>
                     <div class="file-name-row">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8; flex-shrink: 0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-                        <span class="file-basename">${escapeHtml(fileName)}</span>
+                        <button class="file-link-btn" title="Click to open file in editor" onclick="event.stopPropagation(); window.openFileInEditor('${escapeHtml(fa.filePath)}')">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8; flex-shrink: 0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                            <span class="file-basename">${escapeHtml(fileName)}</span>
+                        </button>
                     </div>
-                    ${dirPath ? `<div class="file-dirname">${escapeHtml(dirPath)}/</div>` : ''}
+                    ${dirPath ? `<div class="file-dirname" title="${escapeHtml(dirPath)}">${escapeHtml(dirPath)}/</div>` : ''}
                     ${fa.intent ? `<div class="file-intent">"${escapeHtml(fa.intent)}"</div>` : ''}
                     ${diffBlock}
                     <div class="card-sub-row">
-                        <span style="font-family: monospace;">sha:${fa.fileHashAfter}</span>
-                        <span>+${fa.linesAdded} / -${fa.linesRemoved}</span>
+                        <span style="font-family: monospace;">sha:${fa.fileHashAfter ? fa.fileHashAfter.substring(0, 7) : 'head'}</span>
+                        <span style="color: #94a3b8;">+<strong style="color: #4ade80;">${fa.linesAdded}</strong> / -<strong style="color: #f87171;">${fa.linesRemoved}</strong></span>
                     </div>
                 `;
                 colCardsFiles.appendChild(card);
@@ -1312,8 +1282,8 @@
             if (rawFileActions.length > fileDeckLimit) {
                 const moreFilesDiv = document.createElement('div');
                 moreFilesDiv.style.textAlign = 'center';
-                moreFilesDiv.style.padding = '8px 0';
-                moreFilesDiv.innerHTML = `<button class="action-btn" id="btn-load-more-files" style="width: 100%; font-size: 11px; padding: 6px;">Show Older Modifications (${rawFileActions.length - fileDeckLimit} remaining)</button>`;
+                moreFilesDiv.style.padding = '6px 0';
+                moreFilesDiv.innerHTML = `<button class="btn-action-ghost" id="btn-load-more-files" style="width: 100%; font-size: 10px; padding: 5px;">Show Earlier Modifications (${rawFileActions.length - fileDeckLimit} remaining)</button>`;
                 moreFilesDiv.querySelector('#btn-load-more-files').addEventListener('click', () => {
                     fileDeckLimit += 30;
                     renderBoard();
@@ -1329,8 +1299,9 @@
 
         if (sessionNodes.length === 0) {
             colCardsSessions.innerHTML = `
-                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
-                    No active chat sessions.
+                <div class="deck-empty-state">
+                    <span class="deck-empty-icon">💬</span>
+                    <div>No active sessions found.</div>
                 </div>
             `;
         } else {
@@ -1341,7 +1312,7 @@
                 card.className = 'deck-card session-card';
                 card.addEventListener('click', () => {
                     selectNode(s);
-                    setView('graph');
+                    setView('timeline');
                 });
 
                 const memberCount = (s.details && s.details.stepCount !== undefined)
@@ -1358,7 +1329,7 @@
                         <span class="session-steps-tag">${memberCount} steps</span>
                     </div>
                     <div class="session-title">${escapeHtml(title)}</div>
-                    ${timeObj ? `<div style="font-size: 9px; color: #64748b; margin-top: 4px;" title="${escapeHtml(timeObj.exact)}">🕒 ${escapeHtml(timeObj.relative)}</div>` : ''}
+                    ${timeObj ? `<div style="font-size: 9px; color: var(--text-muted); margin-top: 4px;" title="${escapeHtml(timeObj.exact)}">🕒 ${escapeHtml(timeObj.relative)}</div>` : ''}
                 `;
                 colCardsSessions.appendChild(card);
             });
@@ -1366,8 +1337,8 @@
             if (sessionNodes.length > sessionDeckLimit) {
                 const moreSessionsDiv = document.createElement('div');
                 moreSessionsDiv.style.textAlign = 'center';
-                moreSessionsDiv.style.padding = '8px 0';
-                moreSessionsDiv.innerHTML = `<button class="action-btn" id="btn-load-more-sessions" style="width: 100%; font-size: 11px; padding: 6px;">Show Earlier Sessions (${sessionNodes.length - sessionDeckLimit} remaining)</button>`;
+                moreSessionsDiv.style.padding = '6px 0';
+                moreSessionsDiv.innerHTML = `<button class="btn-action-ghost" id="btn-load-more-sessions" style="width: 100%; font-size: 10px; padding: 5px;">Show Earlier Sessions (${sessionNodes.length - sessionDeckLimit} remaining)</button>`;
                 moreSessionsDiv.querySelector('#btn-load-more-sessions').addEventListener('click', () => {
                     sessionDeckLimit += 20;
                     renderBoard();
@@ -1383,9 +1354,10 @@
 
         if (cartNodes.length === 0) {
             colCardsCart.innerHTML = `
-                <div style="color: #64748b; font-style: italic; font-size: 11px; padding: 24px 12px; text-align: center; border: 1px dashed rgba(255,255,255,0.06); border-radius: 6px; margin: 6px 0;">
-                    Cart is empty.<br>
-                    <span style="font-size: 10px; opacity: 0.8;">Pin nodes across Canvas or Timeline to stage them for agent injection.</span>
+                <div class="deck-empty-state">
+                    <span class="deck-empty-icon">📌</span>
+                    <div>Context Cart is empty.</div>
+                    <div class="deck-empty-hint">Pin items across Canvas or Timeline to stage them for instant AI injection.</div>
                 </div>
             `;
         } else {
@@ -1401,7 +1373,7 @@
                             Remove
                         </button>
                     </div>
-                    <div style="font-size: 11px; color: #f1f5f9; margin-top: 3px;">${escapeHtml(node.details ? node.details.question : '')}</div>
+                    <div style="font-size: 11px; color: var(--text-primary); margin-top: 3px; line-height: 1.35;">${escapeHtml(node.details ? node.details.question : '')}</div>
                 `;
                 colCardsCart.appendChild(card);
             });
@@ -1415,14 +1387,17 @@
                 ruleId: id,
                 reason: 'Revoked via Recovery Deck'
             });
+            showToast('Revoked invariant rule', '🔓');
         }
     };
 
     window.togglePinNode = function(id) {
         if (pinnedNodeIds.has(id)) {
             pinnedNodeIds.delete(id);
+            showToast('Unstaged item from cart', '📌');
         } else {
             pinnedNodeIds.add(id);
+            showToast('Staged item to context cart', '⚡');
         }
         updateCartUI();
         draw();
@@ -1435,6 +1410,7 @@
     function triggerRehydrate() {
         if (vscode) {
             vscode.postMessage({ type: 'rehydrateAgent' });
+            showToast('Compiling .memlite_context.md capsule...', '⚡');
         }
     }
 
@@ -1442,6 +1418,7 @@
         btnPruneHeader.addEventListener('click', () => {
             if (vscode) {
                 vscode.postMessage({ type: 'pruneForeign' });
+                showToast('Pruning foreign workspace memories...', '🧹');
             }
         });
     }
@@ -1484,6 +1461,7 @@
                     ruleType,
                     scope
                 });
+                showToast('Registered Invariant Rule (Tier 0)', '🔒');
             }
             closeInvariantModal();
         });
@@ -1495,6 +1473,10 @@
         tabGraph.classList.toggle('active', viewName === 'graph');
         tabTimeline.classList.toggle('active', viewName === 'timeline');
         tabBoard.classList.toggle('active', viewName === 'board');
+
+        tabGraph.setAttribute('aria-selected', viewName === 'graph');
+        tabTimeline.setAttribute('aria-selected', viewName === 'timeline');
+        tabBoard.setAttribute('aria-selected', viewName === 'board');
 
         viewGraph.classList.toggle('active', viewName === 'graph');
         viewTimeline.classList.toggle('active', viewName === 'timeline');
@@ -1513,20 +1495,14 @@
     tabTimeline.addEventListener('click', () => setView('timeline'));
     tabBoard.addEventListener('click', () => setView('board'));
 
-    // Category Filter Pills
-    filterPills.forEach(pill => {
-        pill.addEventListener('click', () => {
-            filterPills.forEach(p => p.classList.remove('active'));
-            pill.classList.add('active');
-            activeCategoryFilter = pill.dataset.category;
-            if (currentView === 'graph') draw();
-            if (currentView === 'timeline') renderTimeline();
-            if (currentView === 'board') renderBoard();
-        });
-    });
-
     // Search Input Listener
     searchInput.addEventListener('input', () => {
+        const val = searchInput.value.trim();
+        if (val.length > 0) {
+            clearSearchBtn.classList.remove('hidden');
+        } else {
+            clearSearchBtn.classList.add('hidden');
+        }
         if (currentView === 'graph') draw();
         if (currentView === 'timeline') renderTimeline();
         if (currentView === 'board') renderBoard();
@@ -1534,9 +1510,31 @@
 
     clearSearchBtn.addEventListener('click', () => {
         searchInput.value = '';
+        clearSearchBtn.classList.add('hidden');
         if (currentView === 'graph') draw();
         if (currentView === 'timeline') renderTimeline();
         if (currentView === 'board') renderBoard();
+    });
+
+    // Keyboard Shortcuts
+    window.addEventListener('keydown', (e) => {
+        if (e.key === '/' && document.activeElement !== searchInput && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+            e.preventDefault();
+            searchInput.focus();
+            searchInput.select();
+        } else if (e.key === 'Escape') {
+            if (!modalAddInvariant.classList.contains('hidden')) {
+                closeInvariantModal();
+            } else if (!detailPanel.classList.contains('hidden')) {
+                hidePanel();
+            } else if (searchInput.value.length > 0) {
+                searchInput.value = '';
+                clearSearchBtn.classList.add('hidden');
+                if (currentView === 'graph') draw();
+                if (currentView === 'timeline') renderTimeline();
+                if (currentView === 'board') renderBoard();
+            }
+        }
     });
 
     // Listen to messages from TS Extension Host
