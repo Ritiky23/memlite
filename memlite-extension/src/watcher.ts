@@ -9,82 +9,137 @@ export class TranscriptWatcher {
     private db: MemoryDatabase;
     private workspaceRoot?: string;
     private brainPath: string;
-    private watcher: fs.FSWatcher | null = null;
+    private cursorProjectsPath: string;
+    private watchers: Map<string, fs.FSWatcher> = new Map();
     private processedLogs: Map<string, number> = new Map(); // filepath -> last processed line count
+    private alertedGuards: Set<string> = new Set();
+    private watcherDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
 
     constructor(db: MemoryDatabase, workspaceRoot?: string) {
         this.db = db;
         this.workspaceRoot = workspaceRoot;
         const homeDir = os.homedir() || process.env.USERPROFILE || process.env.HOME || '';
         this.brainPath = path.join(homeDir, '.gemini', 'antigravity-ide', 'brain');
+        this.cursorProjectsPath = path.join(homeDir, '.cursor', 'projects');
     }
 
     public start() {
-        if (!fs.existsSync(this.brainPath)) {
-            console.log(`Watcher: Brain path does not exist: ${this.brainPath}. Waiting...`);
-            const timer = setInterval(() => {
-                if (fs.existsSync(this.brainPath)) {
-                    clearInterval(timer);
-                    this.startWatching();
-                }
-            }, 10000);
-            return;
-        }
-        this.startWatching();
-    }
-
-    private startWatching() {
-        console.log(`MemLite Watcher: Monitoring transcripts at ${this.brainPath}`);
+        console.log(`MemLite Watcher: Initializing multi-IDE transcript monitoring...`);
         // Defer heavy log scanning to background so extension activation and webview rendering are instant
         setTimeout(() => {
             this.scanExistingLogs();
         }, 200);
 
+        this.startWatching();
+    }
+
+    private startWatching() {
+        // 1. Antigravity Brain Watcher
+        this.setupWatcher('antigravity', this.brainPath, (filename) => {
+            const normName = filename.replace(/\\/g, '/');
+            return normName.endsWith('transcript.jsonl');
+        });
+
+        // 2. Cursor Projects Watcher
+        this.setupWatcher('cursor', this.cursorProjectsPath, (filename) => {
+            const normName = filename.replace(/\\/g, '/');
+            return normName.endsWith('.jsonl') && (normName.includes('agent-transcripts') || !normName.includes('/'));
+        });
+    }
+
+    private setupWatcher(name: string, rootDir: string, filterFn: (filename: string) => boolean) {
+        if (!fs.existsSync(rootDir)) {
+            console.log(`MemLite Watcher: ${name} path does not exist yet: ${rootDir}. Polling...`);
+            const timer = setInterval(() => {
+                if (fs.existsSync(rootDir)) {
+                    clearInterval(timer);
+                    this.setupWatcher(name, rootDir, filterFn);
+                }
+            }, 15000);
+            return;
+        }
+
         try {
-            this.watcher = fs.watch(this.brainPath, { recursive: true }, (eventType, filename) => {
+            console.log(`MemLite Watcher: Monitoring ${name} transcripts at ${rootDir}`);
+            const watcher = fs.watch(rootDir, { recursive: true }, (eventType, filename) => {
                 if (!filename) return;
-                const normName = filename.replace(/\\/g, '/');
-                if (normName.endsWith('transcript.jsonl')) {
-                    const fullPath = path.join(this.brainPath, filename);
-                    this.processTranscriptFile(fullPath);
+                if (filterFn(filename)) {
+                    const fullPath = path.join(rootDir, filename);
+                    const debounceKey = `${name}:${filename}`;
+                    const existingTimer = this.watcherDebounceTimers.get(debounceKey);
+                    if (existingTimer) clearTimeout(existingTimer);
+                    this.watcherDebounceTimers.set(debounceKey, setTimeout(() => {
+                        this.watcherDebounceTimers.delete(debounceKey);
+                        this.processTranscriptFile(fullPath, true, true);
+                    }, 1200));
                 }
             });
+            this.watchers.set(name, watcher);
         } catch (e) {
-            console.error("MemLite Watcher: Failed to setup recursive directory watcher:", e);
+            console.error(`MemLite Watcher: Failed to setup ${name} directory watcher:`, e);
         }
     }
 
     private scanExistingLogs() {
         try {
-            if (!fs.existsSync(this.brainPath)) return;
-            const convDirs = fs.readdirSync(this.brainPath, { withFileTypes: true })
-                .filter(d => d.isDirectory())
-                .map(d => path.join(this.brainPath, d.name));
-
             const candidateFiles: { filePath: string; mtime: number }[] = [];
-            for (const cDir of convDirs) {
-                const possible = [
-                    path.join(cDir, '.system_generated', 'logs', 'transcript.jsonl'),
-                    path.join(cDir, 'transcript.jsonl')
-                ];
-                for (const p of possible) {
-                    if (fs.existsSync(p)) {
-                        try {
-                            const stat = fs.statSync(p);
-                            candidateFiles.push({ filePath: p, mtime: stat.mtimeMs });
-                        } catch (e) {}
+
+            // 1. Scan Antigravity transcripts
+            if (fs.existsSync(this.brainPath)) {
+                try {
+                    const convDirs = fs.readdirSync(this.brainPath, { withFileTypes: true })
+                        .filter(d => d.isDirectory())
+                        .map(d => path.join(this.brainPath, d.name));
+
+                    for (const cDir of convDirs) {
+                        const possible = [
+                            path.join(cDir, '.system_generated', 'logs', 'transcript.jsonl'),
+                            path.join(cDir, 'transcript.jsonl')
+                        ];
+                        for (const p of possible) {
+                            if (fs.existsSync(p)) {
+                                try {
+                                    const stat = fs.statSync(p);
+                                    candidateFiles.push({ filePath: p, mtime: stat.mtimeMs });
+                                } catch (e) {}
+                            }
+                        }
                     }
-                }
+                } catch (e) {}
             }
 
-            // Sort by most recent mtime descending
+            // 2. Scan Cursor transcripts
+            if (fs.existsSync(this.cursorProjectsPath)) {
+                const findCursorTranscripts = (dir: string, depth: number = 0): void => {
+                    if (depth > 5) return;
+                    try {
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            const fullPath = path.join(dir, entry.name);
+                            if (entry.isDirectory()) {
+                                if (['canvases', 'terminals', 'assets', 'mcps', 'node_modules'].includes(entry.name)) continue;
+                                findCursorTranscripts(fullPath, depth + 1);
+                            } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+                                try {
+                                    const stat = fs.statSync(fullPath);
+                                    candidateFiles.push({ filePath: fullPath, mtime: stat.mtimeMs });
+                                } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                };
+                findCursorTranscripts(this.cursorProjectsPath, 0);
+            }
+
+            // Sort by most recent mtime descending across all IDEs
             candidateFiles.sort((a, b) => b.mtime - a.mtime);
 
-            // Scan top 50 most recent transcripts on startup for fast, comprehensive startup
-            const toScan = candidateFiles.slice(0, 50);
+            // Scan top 60 most recent transcripts on startup for fast, comprehensive startup
+            const toScan = candidateFiles.slice(0, 60);
             let anyNewRecords = false;
             for (const item of toScan) {
-                const added = this.processTranscriptFile(item.filePath, false);
+                // isLive = false during startup log scan so alerts never trigger on reload!
+                const added = this.processTranscriptFile(item.filePath, false, false);
                 if (added) anyNewRecords = true;
             }
 
@@ -97,7 +152,7 @@ export class TranscriptWatcher {
         }
     }
 
-    private processTranscriptFile(filePath: string, triggerRefresh: boolean = true): boolean {
+    private processTranscriptFile(filePath: string, triggerRefresh: boolean = true, isLive: boolean = false): boolean {
         let addedAny = false;
         try {
             if (!fs.existsSync(filePath)) return false;
@@ -107,12 +162,46 @@ export class TranscriptWatcher {
             const lastIndex = this.processedLogs.get(filePath) || 0;
             if (lines.length <= lastIndex && this.processedLogs.has(filePath)) return false;
 
-            // Extract conversation ID from path
-            const parts = filePath.split(path.sep);
+            // Extract conversation ID and infer project from path
+            const normPath = filePath.replace(/\\/g, '/');
+            const parts = normPath.split('/');
+            let conversationId = '';
+            let inferredProject = '';
+
             const brainIndex = parts.indexOf('brain');
-            const conversationId = (brainIndex !== -1 && parts.length > brainIndex + 1)
-                ? parts[brainIndex + 1]
-                : path.basename(path.dirname(path.dirname(filePath)));
+            const cursorProjIdx = parts.indexOf('projects');
+            const agentTransIdx = parts.indexOf('agent-transcripts');
+
+            if (brainIndex !== -1 && parts.length > brainIndex + 1) {
+                // Antigravity IDE
+                conversationId = parts[brainIndex + 1];
+            } else if (agentTransIdx !== -1 && parts.length > agentTransIdx + 1) {
+                // Cursor IDE
+                const sessionId = parts[agentTransIdx + 1];
+                if (normPath.includes('/subagents/')) {
+                    const subId = path.basename(normPath, '.jsonl');
+                    conversationId = `${sessionId}_sub_${subId.slice(0, 8)}`;
+                } else {
+                    conversationId = sessionId;
+                }
+
+                // Infer project from Cursor project directory e.g. "d-CM-backend" -> "backend"
+                if (cursorProjIdx !== -1 && cursorProjIdx + 1 < agentTransIdx) {
+                    const rawProjDir = parts[cursorProjIdx + 1];
+                    if (rawProjDir && rawProjDir !== 'empty-window') {
+                        const reconstructed = rawProjDir.replace(/^([a-zA-Z])-(.*)$/, '$1:/$2').replace(/-/g, '/');
+                        const res = this.extractProjectAndRelPath(reconstructed);
+                        if (res.project && res.project !== 'General') {
+                            inferredProject = res.project;
+                        } else {
+                            const segs = rawProjDir.split('-').filter(Boolean);
+                            inferredProject = segs[segs.length - 1] || 'General';
+                        }
+                    }
+                }
+            } else {
+                conversationId = path.basename(normPath, '.jsonl');
+            }
 
             // Aggregate transcript lines into complete conversation turns
             interface ConversationTurn {
@@ -125,35 +214,68 @@ export class TranscriptWatcher {
 
             const turns: ConversationTurn[] = [];
             let currentTurn: ConversationTurn | null = null;
+            let cursorTurnCounter = 0;
 
             for (const line of lines) {
                 try {
                     const logObj = JSON.parse(line);
-                    
-                    if (logObj.type === 'USER_INPUT' && logObj.content) {
-                        const cleanedQuestion = this.cleanPrompt(logObj.content);
+                    const isUser = logObj.type === 'USER_INPUT' || logObj.role === 'user';
+                    const isAssistant = logObj.type === 'PLANNER_RESPONSE' || logObj.role === 'assistant';
+
+                    if (isUser) {
+                        let rawText = '';
+                        if (logObj.message && Array.isArray(logObj.message.content)) {
+                            rawText = logObj.message.content
+                                .filter((c: any) => c.type === 'text' && c.text)
+                                .map((c: any) => c.text)
+                                .join('\n');
+                        } else if (typeof logObj.content === 'string') {
+                            rawText = logObj.content;
+                        }
+
+                        // Extract <user_query> if present (common in Cursor prompt wrappers)
+                        const uqMatch = rawText.match(/<user_query>([\s\S]*?)<\/user_query>/);
+                        const effectivePrompt = uqMatch ? uqMatch[1].trim() : rawText;
+
+                        // Extract timestamp if present
+                        const tsMatch = rawText.match(/<timestamp>([\s\S]*?)<\/timestamp>/);
+                        const effectiveTimestamp = tsMatch ? tsMatch[1].trim() : (logObj.created_at || undefined);
+
+                        const cleanedQuestion = this.cleanPrompt(effectivePrompt);
                         if (this.isMemoryWorthy(cleanedQuestion)) {
+                            const stepIdx = logObj.step_index !== undefined ? logObj.step_index : (cursorTurnCounter++);
                             currentTurn = {
-                                stepIndex: logObj.step_index ?? 0,
+                                stepIndex: stepIdx,
                                 question: cleanedQuestion,
                                 textResponses: [],
                                 toolCalls: [],
-                                timestamp: logObj.created_at || undefined
+                                timestamp: effectiveTimestamp
                             };
                             turns.push(currentTurn);
                         } else {
                             currentTurn = null;
                         }
-                    } 
-                    else if (currentTurn && logObj.type === 'PLANNER_RESPONSE') {
-                        if (logObj.content) {
-                            const cleaned = this.cleanAnswer(logObj.content);
-                            if (cleaned.length > 0) {
-                                currentTurn.textResponses.push(cleaned);
+                    } else if (currentTurn && isAssistant) {
+                        if (logObj.message && Array.isArray(logObj.message.content)) {
+                            for (const item of logObj.message.content) {
+                                if (item.type === 'text' && item.text) {
+                                    const cleaned = this.cleanAnswer(item.text);
+                                    if (cleaned.length > 0) currentTurn.textResponses.push(cleaned);
+                                } else if (item.type === 'tool_use') {
+                                    currentTurn.toolCalls.push({
+                                        name: item.name,
+                                        args: item.input || item.args || {}
+                                    });
+                                }
                             }
-                        }
-                        if (logObj.tool_calls && Array.isArray(logObj.tool_calls) && logObj.tool_calls.length > 0) {
-                            currentTurn.toolCalls.push(...logObj.tool_calls);
+                        } else {
+                            if (logObj.content) {
+                                const cleaned = this.cleanAnswer(logObj.content);
+                                if (cleaned.length > 0) currentTurn.textResponses.push(cleaned);
+                            }
+                            if (logObj.tool_calls && Array.isArray(logObj.tool_calls) && logObj.tool_calls.length > 0) {
+                                currentTurn.toolCalls.push(...logObj.tool_calls);
+                            }
                         }
                     }
                 } catch (err) {
@@ -167,16 +289,20 @@ export class TranscriptWatcher {
 
             // If no project from tool calls / active document / file paths (e.g. casual chat or questions):
             if (!detectedProject || detectedProject === 'General' || detectedProject === 'Default Project') {
-                const existingCached = this.db.getSessionProject(conversationId);
-                const localProj = this.getLocalWorkspaceProject();
-                const isFocused = vscode.window.state.focused;
-
-                if (existingCached && existingCached !== 'General' && existingCached !== 'Default Project') {
-                    detectedProject = existingCached;
-                } else if (isFocused && localProj !== 'General') {
-                    detectedProject = localProj;
+                if (inferredProject && inferredProject !== 'General' && inferredProject !== 'Default Project') {
+                    detectedProject = inferredProject;
                 } else {
-                    detectedProject = 'General';
+                    const existingCached = this.db.getSessionProject(conversationId);
+                    const localProj = this.getLocalWorkspaceProject();
+                    const isFocused = vscode.window.state.focused;
+
+                    if (existingCached && existingCached !== 'General' && existingCached !== 'Default Project') {
+                        detectedProject = existingCached;
+                    } else if (isFocused && localProj !== 'General') {
+                        detectedProject = localProj;
+                    } else {
+                        detectedProject = 'General';
+                    }
                 }
             }
 
@@ -190,7 +316,8 @@ export class TranscriptWatcher {
                 const toolInfo = this.extractToolContextAndActions(
                     turn.toolCalls,
                     turn.question,
-                    turn.stepIndex
+                    turn.stepIndex,
+                    isLive
                 );
 
                 const mainAnswer = turn.textResponses.join('\n\n').trim();
@@ -212,6 +339,9 @@ export class TranscriptWatcher {
                     ? this.detectProjectName([], turn.toolCalls, detectedProject)
                     : detectedProject;
 
+                const isDecision = /\b(?:workaround|safeguard|fallback|root cause|silently drops|silently fails|decided to|never use|must not|invariant|gotcha)\b/i.test(turn.question + " " + fullAnswer);
+                const contextType = isDecision ? "decision" : (toolInfo.filesTouched.length > 0 ? "code_change" : "discussion");
+
                 const result = this.db.upsertRecord(
                     turn.question,
                     fullAnswer,
@@ -221,8 +351,9 @@ export class TranscriptWatcher {
                     conversationId,
                     turn.stepIndex,
                     toolInfo.filesTouched,
-                    toolInfo.filesTouched.length > 0 ? "code_change" : "discussion",
-                    turn.timestamp
+                    contextType,
+                    turn.timestamp,
+                    toolInfo.symbols
                 );
 
                 if (result.isNew || result.isUpdated) {
@@ -259,7 +390,25 @@ export class TranscriptWatcher {
             .trim();
     }
 
-    private generateDiffSummary(diffText: string, maxLines: number = 20, isRawCode: boolean = false): { summary: string; added: number; removed: number } {
+    private extractSymbolsFromCode(code: string): string[] {
+        const symbolRegex = /(?:def\s+|class\s+|function\s+|export\s+(?:default\s+)?(?:class|function|const|let|var|interface|type)\s+|async\s+def\s+|async\s+function\s+)([a-zA-Z0-9_]+)/g;
+        const symbols = new Set<string>();
+        const blacklist = new Set([
+            'default', 'const', 'let', 'var', 'function', 'class', 'interface', 'type', 'async',
+            'return', 'import', 'from', 'to', 'in', 'as', 'of', 'on', 'at', 'is', 'it', 'if', 'else',
+            'for', 'while', 'new', 'try', 'catch', 'this', 'self', 'true', 'false', 'none', 'null'
+        ]);
+        let match;
+        while ((match = symbolRegex.exec(code)) !== null) {
+            const sym = match[1];
+            if (sym && sym.length >= 3 && !blacklist.has(sym.toLowerCase())) {
+                symbols.add(sym);
+            }
+        }
+        return Array.from(symbols);
+    }
+
+    private generateDiffSummary(diffText: string, maxLines: number = 20, isRawCode: boolean = false): { summary: string; added: number; removed: number; symbols: string[] } {
         const lines = diffText.trim().split('\n');
         const hasDiffMarkers = !isRawCode && lines.some(l => (l.startsWith('+') && !l.startsWith('+++')) || (l.startsWith('-') && !l.startsWith('---')));
 
@@ -273,33 +422,22 @@ export class TranscriptWatcher {
             removed = 0;
         }
 
-        if (lines.length <= maxLines && hasDiffMarkers) {
-            return { summary: diffText.trim(), added, removed };
-        }
-
-        // Extract symbols to create high-signal Semantic Breadcrumb
-        const symbolRegex = /(?:def\s+|class\s+|function\s+|export\s+(?:default\s+)?(?:class|function|const|let|var|interface|type)\s+)([a-zA-Z0-9_]+)/g;
-        const symbols = new Set<string>();
-        for (const l of lines) {
-            if (!hasDiffMarkers || l.startsWith('+') || l.startsWith('-')) {
-                let match;
-                while ((match = symbolRegex.exec(l)) !== null) {
-                    symbols.add(match[1]);
-                }
-            }
-        }
-
-        const symList = Array.from(symbols).slice(0, 5);
+        const symbols = this.extractSymbolsFromCode(diffText);
+        const symList = symbols.slice(0, 5);
         const symStr = symList.length > 0 ? `{${symList.join(', ')}}` : '{general logic}';
 
+        if (lines.length <= maxLines && hasDiffMarkers) {
+            return { summary: diffText.trim(), added, removed, symbols };
+        }
+
         if (lines.length <= maxLines && !hasDiffMarkers) {
-            return { summary: diffText.trim(), added, removed };
+            return { summary: diffText.trim(), added, removed, symbols };
         }
 
         const label = hasDiffMarkers ? 'LARGE DIFF' : 'FILE CONTENT';
         const breadcrumb = `[${label}: +${added} lines, -${removed} lines across ${lines.length} total lines. Key modified symbols: ${symStr}. Inspect file directly on disk.]`;
 
-        return { summary: breadcrumb, added, removed };
+        return { summary: breadcrumb, added, removed, symbols };
     }
 
     private computeHash(text: string): string {
@@ -321,6 +459,7 @@ export class TranscriptWatcher {
         if (!targetPath) return false;
         const norm = targetPath.replace(/\\/g, '/').toLowerCase();
         if (norm.includes('.gemini/antigravity-ide/brain') || 
+            norm.includes('.cursor') ||
             norm.includes('appdata/local') || 
             norm.includes('node_modules')) {
             return false;
@@ -354,6 +493,21 @@ export class TranscriptWatcher {
             return { project: 'optimus', relPath: after || 'optimus' };
         }
 
+        if (norm.includes('.cursor/projects/')) {
+            const slugMatch = norm.match(/\.cursor\/projects\/([^\/]+)/);
+            if (slugMatch && slugMatch[1] !== 'empty-window') {
+                const rawSlug = slugMatch[1];
+                const reconstructed = rawSlug.replace(/^([a-zA-Z])-(.*)$/, '$1:/$2').replace(/-/g, '/');
+                const res = this.extractProjectAndRelPath(reconstructed);
+                if (res.project && res.project !== 'General') {
+                    return res;
+                }
+                const segs = rawSlug.split('-').filter(Boolean);
+                const fallback = segs[segs.length - 1] || 'General';
+                return { project: fallback, relPath: path.basename(norm) };
+            }
+        }
+
         const m = norm.match(/^[a-zA-Z]:\/(.+)$/);
         if (m) {
             const parts = m[1].split('/').filter(Boolean);
@@ -361,7 +515,11 @@ export class TranscriptWatcher {
                 const seg = parts[i];
                 const low = seg.toLowerCase();
                 if (!blacklist.has(low) && !/^[0-9a-f]{8}-[0-9a-f]{4}/.test(low) && !seg.includes('.')) {
-                    const proj = seg === 'memlite-extension' ? 'memlite' : seg;
+                    let proj = seg === 'memlite-extension' ? 'memlite' : seg;
+                    if (/^[a-zA-Z]-/.test(proj)) {
+                        const segs = proj.split('-').filter(Boolean);
+                        proj = segs[segs.length - 1] || proj;
+                    }
                     const rel = parts.slice(i + 1).join('/');
                     return { project: proj, relPath: rel || proj };
                 }
@@ -378,30 +536,33 @@ export class TranscriptWatcher {
     private extractToolContextAndActions(
         toolCalls: any[],
         currentQuestion: string,
-        stepIndex: number
-    ): { summary: string; filesTouched: string[] } {
+        stepIndex: number,
+        isLive: boolean = false
+    ): { summary: string; filesTouched: string[]; symbols: string[] } {
         if (!toolCalls || !Array.isArray(toolCalls) || toolCalls.length === 0) {
-            return { summary: '', filesTouched: [] };
+            return { summary: '', filesTouched: [], symbols: [] };
         }
 
         let summary = '\n\n### 🛠️ Code Actions & Changes';
         let hasActions = false;
         const filesTouchedSet = new Set<string>();
+        const allSymbols = new Set<string>();
 
         toolCalls.forEach((tc: any, actionIdx: number) => {
             const name = tc.name || '';
-            const args = tc.args || {};
+            const args = tc.args || tc.input || tc.parameters || {};
             
-            if (name === 'write_to_file' || name === 'create_file') {
+            if (name === 'write_to_file' || name === 'create_file' || name === 'Write') {
                 const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
                 if (rawFile && this.isUserWorkspaceFile(rawFile)) {
                     hasActions = true;
                     const { relPath: relFile } = this.extractProjectAndRelPath(rawFile);
-                    const code = this.cleanArg(args.CodeContent || args.content || args.file_text || '');
+                    const code = this.cleanArg(args.CodeContent || args.content || args.file_text || args.contents || '');
                     filesTouchedSet.add(relFile);
 
-                    const { summary: diffSummary, added, removed } = this.generateDiffSummary(code, 20, true);
+                    const { summary: diffSummary, added, removed, symbols: actionSymbols } = this.generateDiffSummary(code, 20, true);
                     const fileHash = this.computeHash(code);
+                    actionSymbols.forEach(s => allSymbols.add(s));
 
                     this.db.recordFileAction({
                         id: `${stepIndex}_${actionIdx}_${this.computeHash(relFile)}`,
@@ -411,23 +572,37 @@ export class TranscriptWatcher {
                         fileHashAfter: fileHash,
                         intent: currentQuestion,
                         diffSummary,
+                        symbols: actionSymbols,
                         linesAdded: added,
                         linesRemoved: removed,
                         timestamp: new Date().toISOString()
                     });
 
+                    // Only alert during live interactions, never on startup log scanning
+                    if (isLive) {
+                        this.checkAndTriggerGuardianAlert(relFile, actionSymbols);
+                    }
+
                     summary += `\n\n📄 **Created File:** \`${relFile}\` (SHA: \`${fileHash}\`)\n\`\`\`\n${code.substring(0, 500)}${code.length > 500 ? '\n... (truncated)' : ''}\n\`\`\``;
                 }
-            } else if (name === 'replace_file_content' || name === 'edit_file' || name === 'apply_diff' || name === 'apply_patch') {
+            } else if (name === 'replace_file_content' || name === 'edit_file' || name === 'apply_diff' || name === 'apply_patch' || name === 'StrReplace') {
                 const rawFile = this.cleanArg(args.TargetFile || args.path || args.file_path || '');
                 if (rawFile && this.isUserWorkspaceFile(rawFile)) {
                     hasActions = true;
                     const { relPath: relFile } = this.extractProjectAndRelPath(rawFile);
-                    const rep = this.cleanArg(args.ReplacementContent || args.replacement || args.content || '');
+                    const rep = this.cleanArg(args.ReplacementContent || args.replacement || args.new_string || args.content || '');
+                    const oldStr = this.cleanArg(args.old_string || '');
                     filesTouchedSet.add(relFile);
 
-                    const { summary: diffSummary, added, removed } = this.generateDiffSummary(rep);
+                    // Form structured diff if oldStr and rep exist (e.g. Cursor StrReplace)
+                    let diffInput = rep;
+                    if (oldStr && rep) {
+                        diffInput = `--- a/${path.basename(rawFile)}\n+++ b/${path.basename(rawFile)}\n- ${oldStr.split('\n').join('\n- ')}\n+ ${rep.split('\n').join('\n+ ')}`;
+                    }
+
+                    const { summary: diffSummary, added, removed, symbols: actionSymbols } = this.generateDiffSummary(diffInput);
                     const fileHash = this.computeHash(rep);
+                    actionSymbols.forEach(s => allSymbols.add(s));
 
                     this.db.recordFileAction({
                         id: `${stepIndex}_${actionIdx}_${this.computeHash(relFile)}`,
@@ -437,10 +612,16 @@ export class TranscriptWatcher {
                         fileHashAfter: fileHash,
                         intent: currentQuestion,
                         diffSummary,
+                        symbols: actionSymbols,
                         linesAdded: added,
                         linesRemoved: removed,
                         timestamp: new Date().toISOString()
                     });
+
+                    // Only alert during live interactions, never on startup log scanning
+                    if (isLive) {
+                        this.checkAndTriggerGuardianAlert(relFile, actionSymbols);
+                    }
 
                     if (diffSummary.startsWith('[LARGE DIFF')) {
                         summary += `\n\n✏️ **Modified File:** \`${relFile}\`\n${diffSummary}`;
@@ -459,13 +640,18 @@ export class TranscriptWatcher {
                     let totalAdded = 0;
                     let totalRemoved = 0;
                     let combinedRep = '';
+                    const chunkSymbols: string[] = [];
                     if (args.ReplacementChunks && Array.isArray(args.ReplacementChunks)) {
                         args.ReplacementChunks.forEach((chunk: any, i: number) => {
                             const rep = this.cleanArg(chunk.ReplacementContent || '');
                             combinedRep += rep + '\n';
-                            const { summary: diffSummary, added, removed } = this.generateDiffSummary(rep);
+                            const { summary: diffSummary, added, removed, symbols: cSyms } = this.generateDiffSummary(rep);
                             totalAdded += added;
                             totalRemoved += removed;
+                            cSyms.forEach(s => {
+                                allSymbols.add(s);
+                                if (!chunkSymbols.includes(s)) chunkSymbols.push(s);
+                            });
                             summary += `\n* **Chunk ${i+1}:** ${diffSummary}`;
                         });
                     }
@@ -478,12 +664,18 @@ export class TranscriptWatcher {
                         fileHashAfter: fileHash,
                         intent: currentQuestion,
                         diffSummary: `Multi-line edit across ${args.ReplacementChunks?.length || 1} chunks`,
+                        symbols: chunkSymbols,
                         linesAdded: totalAdded,
                         linesRemoved: totalRemoved,
                         timestamp: new Date().toISOString()
                     });
+
+                    // Only alert during live interactions, never on startup log scanning
+                    if (isLive) {
+                        this.checkAndTriggerGuardianAlert(relFile, chunkSymbols);
+                    }
                 }
-            } else if (name === 'run_command' || name === 'execute_command' || name === 'run_shell_command') {
+            } else if (name === 'run_command' || name === 'execute_command' || name === 'run_shell_command' || name === 'Shell') {
                 hasActions = true;
                 const cmd = this.cleanArg(args.CommandLine || args.command || '');
                 summary += `\n\n💻 **Executed Command:** \`${cmd}\``;
@@ -492,8 +684,40 @@ export class TranscriptWatcher {
 
         return {
             summary: hasActions ? summary : '',
-            filesTouched: Array.from(filesTouchedSet)
+            filesTouched: Array.from(filesTouchedSet),
+            symbols: Array.from(allSymbols)
         };
+    }
+
+    private checkAndTriggerGuardianAlert(filePath: string, symbols: string[]) {
+        try {
+            const activeInvariants = this.db.getInvariantsForFileOrSymbol(filePath, symbols);
+            if (!activeInvariants || activeInvariants.length === 0) return;
+
+            activeInvariants.forEach(inv => {
+                const guardKey = `${filePath}_${inv.id}`;
+                if (this.alertedGuards.has(guardKey)) return;
+                this.alertedGuards.add(guardKey);
+
+                const symText = symbols.length > 0 ? ` (touching '${symbols.slice(0, 3).join("', '")}')` : '';
+                vscode.window.showWarningMessage(
+                    `MemLite Guardian: Agent is modifying '${filePath}'${symText}. Active Invariant: "${inv.content}"`,
+                    "Copy Constraint for Agent",
+                    "View in Graph",
+                    "Dismiss"
+                ).then(choice => {
+                    if (choice === "Copy Constraint for Agent") {
+                        const directive = `[MemLite Project Invariant]: '${filePath}' has an active constraint: "${inv.content}". Do NOT violate or remove this requirement.`;
+                        vscode.env.clipboard.writeText(directive);
+                        vscode.window.showInformationMessage("🧠 MemLite: Constraint copied! Paste into agent chat.");
+                    } else if (choice === "View in Graph") {
+                        vscode.commands.executeCommand('memlite.showGraph');
+                    }
+                });
+            });
+        } catch (e) {
+            console.error("MemLite Watcher: Error checking guardian alert:", e);
+        }
     }
 
     private cleanPrompt(rawPrompt: string): string {
@@ -502,10 +726,16 @@ export class TranscriptWatcher {
         if (requestMatch) {
             text = requestMatch[1];
         } else {
-            text = text.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '');
-            text = text.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, '');
-            text = text.replace(/<conversation_summaries>[\s\S]*?<\/conversation_summaries>/g, '');
+            const uqMatch = rawPrompt.match(/<user_query>([\s\S]*?)<\/user_query>/);
+            if (uqMatch) {
+                text = uqMatch[1];
+            } else {
+                text = text.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '');
+                text = text.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, '');
+                text = text.replace(/<conversation_summaries>[\s\S]*?<\/conversation_summaries>/g, '');
+            }
         }
+        text = text.replace(/<timestamp>[\s\S]*?<\/timestamp>/g, '');
 
         // Strip injected MemLite context blocks to prevent recursive context loop pollution
         text = text.replace(/--- MEMLITE CONTEXT ---[\s\S]*?-----------------------/g, '');
@@ -541,7 +771,7 @@ export class TranscriptWatcher {
         // 1. Highest priority: Check tool calls for absolute project paths
         if (Array.isArray(toolCalls)) {
             for (const tc of toolCalls) {
-                const args = tc.args || tc.parameters || {};
+                const args = tc.args || tc.input || tc.parameters || {};
                 const candidates = [
                     args.Cwd,
                     args.TargetFile,
@@ -549,7 +779,8 @@ export class TranscriptWatcher {
                     args.AbsolutePath,
                     args.DirectoryPath,
                     args.CommandLine,
-                    args.filePath
+                    args.filePath,
+                    args.path
                 ];
                 for (const cand of candidates) {
                     if (typeof cand === 'string') {
@@ -601,7 +832,7 @@ export class TranscriptWatcher {
                     // Check tool calls inside line if present
                     if (obj.tool_calls && Array.isArray(obj.tool_calls)) {
                         for (const tc of obj.tool_calls) {
-                            const args = tc.args || tc.parameters || {};
+                            const args = tc.args || tc.input || tc.parameters || {};
                             for (const k of Object.keys(args)) {
                                 if (typeof args[k] === 'string') {
                                     const found = extractFromPath(args[k]);
@@ -632,9 +863,13 @@ export class TranscriptWatcher {
     }
 
     public stop() {
-        if (this.watcher) {
-            this.watcher.close();
-            this.watcher = null;
+        this.watcherDebounceTimers.forEach(t => clearTimeout(t));
+        this.watcherDebounceTimers.clear();
+        for (const [name, watcher] of this.watchers.entries()) {
+            try {
+                watcher.close();
+            } catch (_) {}
         }
+        this.watchers.clear();
     }
 }

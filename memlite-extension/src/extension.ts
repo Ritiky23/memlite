@@ -5,10 +5,12 @@ import * as os from 'os';
 import { MemoryDatabase } from './database';
 import { TranscriptWatcher } from './watcher';
 import { MemoryGraphWebviewProvider } from './webview';
+import { MemLiteCodeLensProvider, MemLiteHoverProvider } from './codelens';
 
 let watcher: TranscriptWatcher | null = null;
 let activePanel: vscode.WebviewPanel | undefined = undefined;
 let dbInstance: MemoryDatabase | null = null;
+let codeLensProviderInstance: MemLiteCodeLensProvider | null = null;
 
 export function getCurrentWorkspaceProject(): string {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -59,6 +61,70 @@ export function activate(context: vscode.ExtensionContext) {
     watcher = new TranscriptWatcher(db, workspaceRoot);
     watcher.start();
 
+    // Register CodeLens and Hover Providers for Institutional Memory ("Why does this code exist?")
+    const supportedLanguages: vscode.DocumentSelector = [
+        { scheme: 'file', language: 'typescript' },
+        { scheme: 'file', language: 'javascript' },
+        { scheme: 'file', language: 'typescriptreact' },
+        { scheme: 'file', language: 'javascriptreact' },
+        { scheme: 'file', language: 'python' },
+        { scheme: 'file', language: 'go' },
+        { scheme: 'file', language: 'rust' }
+    ];
+
+    const codeLensProvider = new MemLiteCodeLensProvider(db);
+    codeLensProviderInstance = codeLensProvider;
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(supportedLanguages, codeLensProvider)
+    );
+
+    const hoverProvider = new MemLiteHoverProvider(db);
+    context.subscriptions.push(
+        vscode.languages.registerHoverProvider(supportedLanguages, hoverProvider)
+    );
+
+    // Command to inspect why a symbol exists and view all linked decisions
+    context.subscriptions.push(
+        vscode.commands.registerCommand('memlite.explainSymbol', async (symbol: string, filePath: string, memories?: any[], fileActions?: any[], invariants?: any[]) => {
+            const mems = memories || db.getMemoriesForSymbol(symbol);
+            const acts = fileActions || db.getFileActionsForSymbol(symbol);
+            const invs = invariants || db.getInvariantsForFileOrSymbol(filePath, [symbol]);
+
+            let summary = `# 🧠 MemLite: Why '${symbol}' Exists\n\n`;
+            summary += `**File:** \`${filePath}\`\n\n`;
+
+            if (invs.length > 0) {
+                summary += `## 🔒 Active Invariants & Negative Constraints\n`;
+                invs.forEach((inv: any) => {
+                    summary += `- **[${inv.ruleType}]** ${inv.content} *(Scope: \`${inv.scope}\`)*\n`;
+                });
+                summary += `\n`;
+            }
+
+            if (mems.length > 0) {
+                summary += `## 💡 Historical Decisions & Context\n`;
+                mems.forEach((m: any) => {
+                    const date = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'Past Session';
+                    summary += `### ${m.question}\n*Recorded: ${date}*\n\n${m.answer}\n\n---\n`;
+                });
+            }
+
+            if (acts.length > 0) {
+                summary += `## 🛠️ Code Modification History\n`;
+                acts.forEach((a: any) => {
+                    summary += `- **Step ${a.stepIndex} [${a.action.toUpperCase()}]:** "${a.intent}"\n`;
+                    if (a.diffSummary) summary += `  ${a.diffSummary}\n`;
+                });
+            }
+
+            const doc = await vscode.workspace.openTextDocument({
+                content: summary,
+                language: 'markdown'
+            });
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside, true);
+        })
+    );
+
     // Register sidebar Webview View
     const provider = new MemoryGraphWebviewProvider(context.extensionUri, db);
     context.subscriptions.push(
@@ -72,6 +138,9 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('memlite.refreshGraphView', () => {
             provider.refresh();
+            if (codeLensProviderInstance) {
+                codeLensProviderInstance.refresh();
+            }
             if (activePanel) {
                 activePanel.webview.postMessage({
                     type: 'updateGraph',
@@ -435,6 +504,7 @@ export function deactivate() {
     }
     if (dbInstance) {
         dbInstance.flush();
+        dbInstance.close();
     }
     console.log('MemLite: Extension is deactivated.');
 }

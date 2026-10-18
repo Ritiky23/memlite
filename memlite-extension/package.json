@@ -2,7 +2,7 @@
     "name": "memlite-extension",
     "displayName": "MemLite — Local AI Memory & Context Recovery Hub",
     "description": "Offline-first memory engine and tiered context recovery system for AI coding assistants.",
-    "version": "2.0.2",
+    "version": "2.2.0",
     "publisher": "memlite",
     "icon": "media/logo.png",
 
@@ -19,6 +19,7 @@
         "Other"
     ],
     "activationEvents": [
+        "onStartupFinished",
         "onView:memlite-graph-view"
     ],
     "main": "./out/extension.js",
@@ -61,6 +62,10 @@
             {
                 "command": "memlite.clearDatabase",
                 "title": "MemLite: Clear All Memories"
+            },
+            {
+                "command": "memlite.explainSymbol",
+                "title": "MemLite: Explain Why This Code Exists"
             }
         ],
         "menus": {

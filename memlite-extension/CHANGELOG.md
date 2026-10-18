@@ -2,6 +2,45 @@
 
 All notable changes to the **MemLite** extension are documented in this file.
 
+## [2.2.0] - 2026-10-18
+
+### 🚀 Major Release: Multi-IDE Support (Cursor + Antigravity), In-Editor CodeLens, & Guardian Invariants
+
+#### 🌐 Universal Multi-IDE Watcher & Transcript Engine
+- **Simultaneous Cross-IDE Ingestion**: Dual-stream background watcher that automatically detects and monitors active transcripts across both **Antigravity IDE** (`~/.gemini/antigravity-ide/brain`) and **Cursor IDE** (`~/.cursor/projects`).
+- **Cursor Transcript Normalization**: Seamlessly parses Anthropic/OpenAI function schemas (`role: "user"`, `role: "assistant"`, `type: "tool_use"`) and Cursor prompt wrappers (`<user_query>`, `<timestamp>`).
+- **Cursor Tool Ingestion**: Full AST symbol and diff extraction for Cursor-native tool actions:
+  - `StrReplace`: Generates unified diff previews and tracks line changes across `old_string` / `new_string`.
+  - `Write`: Captures new file creations from `args.contents`.
+  - `Shell`: Logs executed terminal commands.
+- **Automatic Project Slug Decoding**: Automatically normalizes Cursor folder slugs (`d-CM-backend` ➔ `backend`, `d-Futurebits` ➔ `Futurebits`, `d-CM-optimus` ➔ `optimus`) for unified cross-IDE project scoping.
+
+#### 🧠 In-Editor CodeLens & Symbol Provenance ("Why does this code exist?")
+- **Interactive CodeLens Buttons**: Contextual indicators floating directly above functions, classes, and types (`def`, `class`, `function`, `export`) displaying:
+  - Total AI sessions & modifications touching this symbol.
+  - Active invariant warnings (e.g., `⚠️ 1 Active Invariant`).
+- **Symbol Provenance Inspector (`memlite.explainSymbol`)**: Click any CodeLens to open an architectural dossier displaying:
+  - Historical reasons, user prompts, and agent decisions that created or altered the symbol.
+  - Linked file actions and exact diff summaries.
+  - Active project invariants with a 1-click **"Copy Constraint for Agent"** action.
+- **Deterministic Action Extractor**: Extracts clean engineering titles (e.g. `Fixed 4-5 Min Shutdown Freeze`) instead of raw prompt clicks (`"ok"`, `"yes"`, `"continue"`).
+- **Rich Hover Provider**: Hover over any symbol to inspect active invariants and its institutional memory card directly in your editor.
+
+#### 🛡️ Guardian Active Invariants & Negative Constraints
+- **Real-Time Agent Modification Alerting**: Automatically warns developers and agents whenever an AI assistant touches a file or symbol governed by an active negative invariant.
+- **One-Click Agent Directives**: Provides instant clipboard copying of exact negative constraints formatted for immediate pasting into agent chat windows.
+- **Deduplicated Guard Tracking**: Prevents notification spamming during rapid multi-file agent edits.
+
+#### ⚡ Critical Stability & Storage Fix (4–16 GB Disk Leak Resolved)
+- **Windows NTFS Atomic Write Leak Fix**: Replaced randomized PID/timestamp temporary file generation (`memlite_db.json.<PID>.<time>.<rand>.tmp`) with deterministic single-file writes, guaranteed `finally` cleanup, and startup orphan sweeps—eliminating multi-gigabyte disk leaks caused by Windows file-locking race conditions.
+- **Watcher Debouncing (1200ms)**: Added intelligent debounce timers to `fs.watch` to prevent event loop flooding and V8 heap exhaustion while AI agents stream tokens.
+
+#### 🔌 Model Context Protocol (MCP) Upgrades
+- Added native MCP server tools:
+  - `add_invariant`, `revoke_invariant`, `supersede_invariant`: Allows external LLM agents (Gemini, Claude, Cursor) to read and modify project rules deterministically.
+  - `check_workspace_freshness`: Verifies whether disk files have diverged from agent memory.
+  - `get_rehydrate_capsule`: One-call recovery payload containing active invariants and causal file history.
+
 ## [2.0.2] - 2026-09-21
 
 ### Multi-Window Project Scoping & Robust Workspace Isolation

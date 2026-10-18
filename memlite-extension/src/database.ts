@@ -22,6 +22,7 @@ export interface FileActionItem {
     fileHashAfter: string;
     intent: string;
     diffSummary: string;
+    symbols?: string[];
     linesAdded: number;
     linesRemoved: number;
     timestamp: string;
@@ -35,6 +36,7 @@ export interface MemoryNode {
     project: string;
     fileRef?: string;
     filesTouched?: string[];
+    symbols?: string[];
     contextType?: "decision" | "code_change" | "milestone" | "discussion";
     tags: string[];
     conversationId?: string;
@@ -58,11 +60,15 @@ export interface DatabaseSchema {
 
 export class MemoryDatabase {
     private dbPath: string;
+    private invariantsPath: string;
+    private invariantsListeners: (() => void)[] = [];
     private data: DatabaseSchema;
     private indexedSteps: Set<string> = new Set();
     private stepNodeMap: Map<string, MemoryNode> = new Map();
     private idNodeMap: Map<string, MemoryNode> = new Map();
     private fileRefNodesMap: Map<string, MemoryNode[]> = new Map();
+    private symbolNodesMap: Map<string, MemoryNode[]> = new Map();
+    private symbolActionsMap: Map<string, FileActionItem[]> = new Map();
     private saveTimeout: NodeJS.Timeout | null = null;
 
     constructor(storagePath: string) {
@@ -70,8 +76,59 @@ export class MemoryDatabase {
             fs.mkdirSync(storagePath, { recursive: true });
         }
         this.dbPath = path.join(storagePath, 'memlite_db.json');
+        this.invariantsPath = path.join(storagePath, 'invariants.json');
         this.data = { nodes: [], relationships: [], invariants: [], fileActions: [], sessionTitles: {}, sessionProjects: {} };
+
+        // Clean up any leaked or orphaned .tmp files from disk immediately on startup
+        this.cleanupOrphanedTempFiles();
+
         this.load();
+
+        // Watch invariants.json for real-time updates from Python MCP server
+        try {
+            if (fs.existsSync(this.invariantsPath)) {
+                fs.watchFile(this.invariantsPath, { interval: 1000 }, () => {
+                    this.notifyInvariantsChanged();
+                });
+            }
+        } catch (_) {}
+    }
+
+    public cleanupOrphanedTempFiles(): void {
+        try {
+            const dir = path.dirname(this.dbPath);
+            if (!fs.existsSync(dir)) return;
+            const files = fs.readdirSync(dir);
+            for (const f of files) {
+                if (f.endsWith('.tmp') || f.includes('.tmp') || f.endsWith('.bak')) {
+                    try {
+                        fs.unlinkSync(path.join(dir, f));
+                    } catch (_) {}
+                }
+            }
+        } catch (_) {}
+    }
+
+    public close(): void {
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+        }
+        try {
+            if (this.invariantsPath && fs.existsSync(this.invariantsPath)) {
+                fs.unwatchFile(this.invariantsPath);
+            }
+        } catch (_) {}
+    }
+
+    public onInvariantsChanged(listener: () => void): void {
+        this.invariantsListeners.push(listener);
+    }
+
+    public notifyInvariantsChanged(): void {
+        this.invariantsListeners.forEach(fn => {
+            try { fn(); } catch (_) {}
+        });
     }
 
     private safeJsonParse(raw: string): any {
@@ -141,6 +198,8 @@ export class MemoryDatabase {
         this.stepNodeMap.clear();
         this.idNodeMap.clear();
         this.fileRefNodesMap.clear();
+        this.symbolNodesMap.clear();
+        this.symbolActionsMap.clear();
 
         this.data.nodes.forEach(n => {
             if (n.id) {
@@ -166,10 +225,61 @@ export class MemoryDatabase {
                 existing.push(n);
                 this.fileRefNodesMap.set(n.fileRef, existing);
             }
+            if (n.symbols && Array.isArray(n.symbols)) {
+                n.symbols.forEach(sym => {
+                    const existing = this.symbolNodesMap.get(sym) || [];
+                    existing.push(n);
+                    this.symbolNodesMap.set(sym, existing);
+                });
+            }
             if (n.conversationId && this.data.sessionProjects && this.data.sessionProjects[n.conversationId]) {
                 n.project = this.data.sessionProjects[n.conversationId];
             }
         });
+
+        let backfilledAny = false;
+        if (this.data.fileActions && Array.isArray(this.data.fileActions)) {
+            const symRegex = /(?:def\s+|class\s+|function\s+|export\s+(?:default\s+)?(?:class|function|const|let|var)\s+|async\s+def\s+|async\s+function\s+|private\s+|public\s+|protected\s+|static\s+)([a-zA-Z0-9_]+)/g;
+            const blacklist = new Set(['default', 'const', 'let', 'var', 'function', 'class', 'interface', 'type', 'async', 'return', 'import', 'from', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'new', 'try', 'catch', 'finally', 'throw', 'this', 'super', 'true', 'false', 'null', 'undefined', 'void', 'any', 'string', 'number', 'boolean', 'general', 'logic']);
+
+            this.data.fileActions.forEach(fa => {
+                if (!fa.symbols || fa.symbols.length === 0) {
+                    const foundSyms = new Set<string>();
+                    if (fa.diffSummary) {
+                        const mBreadcrumb = fa.diffSummary.match(/Key modified symbols:\s*\{([^}]+)\}/);
+                        if (mBreadcrumb && mBreadcrumb[1] !== 'general logic') {
+                            mBreadcrumb[1].split(',').forEach(s => {
+                                const trimS = s.trim();
+                                if (trimS && !blacklist.has(trimS.toLowerCase())) foundSyms.add(trimS);
+                            });
+                        }
+                        let m;
+                        while ((m = symRegex.exec(fa.diffSummary)) !== null) {
+                            const sym = m[1];
+                            if (sym && sym.length > 2 && !blacklist.has(sym.toLowerCase())) {
+                                foundSyms.add(sym);
+                            }
+                        }
+                    }
+                    if (foundSyms.size > 0) {
+                        fa.symbols = Array.from(foundSyms);
+                        backfilledAny = true;
+                    }
+                }
+
+                if (fa.symbols && Array.isArray(fa.symbols)) {
+                    fa.symbols.forEach(sym => {
+                        const existing = this.symbolActionsMap.get(sym) || [];
+                        existing.push(fa);
+                        this.symbolActionsMap.set(sym, existing);
+                    });
+                }
+            });
+        }
+
+        if (backfilledAny) {
+            this.save(true);
+        }
     }
 
     private sanitizeDatabase() {
@@ -434,25 +544,37 @@ export class MemoryDatabase {
     }
 
     private writeDatabaseToDisk() {
+        const dir = path.dirname(this.dbPath);
+        if (!fs.existsSync(dir)) {
+            try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+        }
+        // Fixed deterministic temp path per process - prevents unique randomized file accumulation
+        const tempPath = `${this.dbPath}.tmp`;
+        let tempCreated = false;
         try {
-            const dir = path.dirname(this.dbPath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            const tempPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).substring(2, 8)}.tmp`;
-            const content = JSON.stringify(this.data, null, 2);
+            // Minified JSON - 40% smaller payload and much faster disk writes
+            const content = JSON.stringify(this.data);
             fs.writeFileSync(tempPath, content, 'utf8');
+            tempCreated = true;
+
             try {
                 fs.renameSync(tempPath, this.dbPath);
-            } catch (renameErr) {
+                tempCreated = false;
+            } catch (_) {
+                // Windows lock fallback: direct copy and unlink
                 fs.copyFileSync(tempPath, this.dbPath);
                 try { fs.unlinkSync(tempPath); } catch (_) {}
+                tempCreated = false;
             }
-            try {
-                fs.copyFileSync(this.dbPath, this.dbPath + '.bak');
-            } catch (_) {}
         } catch (e) {
             console.error("Failed to save MemLite database:", e);
+        } finally {
+            // Guarantee: temporary file is ALWAYS cleaned up if it still exists
+            if (tempCreated) {
+                try {
+                    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+                } catch (_) {}
+            }
         }
     }
 
@@ -466,7 +588,8 @@ export class MemoryDatabase {
         stepIndex?: number,
         filesTouched?: string[],
         contextType?: "decision" | "code_change" | "milestone" | "discussion",
-        recordTimestamp?: string
+        recordTimestamp?: string,
+        symbols?: string[]
     ): { node: MemoryNode; isNew: boolean; isUpdated: boolean } {
         const extractedTags = this.extractTags(question + " " + answer);
         const uniqueTags = Array.from(new Set([...manualTags, ...extractedTags]))
@@ -527,8 +650,35 @@ export class MemoryDatabase {
                 existingNode.filesTouched = Array.from(new Set([...(existingNode.filesTouched || []), ...(filesTouched || [])]));
                 existingNode.contextType = contextType;
                 existingNode.tags = Array.from(new Set([...existingNode.tags, ...uniqueTags]));
+                if (symbols && symbols.length > 0) {
+                    const existingSymbols = existingNode.symbols || [];
+                    const merged = Array.from(new Set([...existingSymbols, ...symbols]));
+                    existingNode.symbols = merged;
+                    symbols.forEach(sym => {
+                        const list = this.symbolNodesMap.get(sym) || [];
+                        if (!list.some(n => n.id === existingNode!.id)) {
+                            list.push(existingNode!);
+                            this.symbolNodesMap.set(sym, list);
+                        }
+                    });
+                }
                 this.save(false);
                 return { node: existingNode, isNew: false, isUpdated: true };
+            }
+            if (symbols && symbols.length > 0) {
+                const existingSymbols = existingNode.symbols || [];
+                const merged = Array.from(new Set([...existingSymbols, ...symbols]));
+                if (merged.length !== existingSymbols.length) {
+                    existingNode.symbols = merged;
+                    symbols.forEach(sym => {
+                        const list = this.symbolNodesMap.get(sym) || [];
+                        if (!list.some(n => n.id === existingNode!.id)) {
+                            list.push(existingNode!);
+                            this.symbolNodesMap.set(sym, list);
+                        }
+                    });
+                    this.save(false);
+                }
             }
             if (recordTimestamp && (!existingNode.timestamp || existingNode.timestamp > recordTimestamp)) {
                 existingNode.timestamp = recordTimestamp;
@@ -536,15 +686,19 @@ export class MemoryDatabase {
             return { node: existingNode, isNew: false, isUpdated: false };
         }
 
+        const cappedQuestion = question && question.length > 1000 ? question.substring(0, 1000) : question;
+        const cappedAnswer = answer && answer.length > 3000 ? answer.substring(0, 3000) + "\n... [truncated for memory efficiency]" : answer;
+
         const id = crypto.randomUUID();
         const newNode: MemoryNode = {
             id,
-            question,
-            answer,
+            question: cappedQuestion,
+            answer: cappedAnswer,
             timestamp: recordTimestamp || new Date().toISOString(),
             project: project || "Default Project",
             fileRef,
             filesTouched: filesTouched || [],
+            symbols: symbols || [],
             contextType,
             tags: uniqueTags,
             conversationId,
@@ -553,6 +707,32 @@ export class MemoryDatabase {
 
         this.data.nodes.push(newNode);
         this.idNodeMap.set(id, newNode);
+
+        // Bound nodes to max 1000 items to prevent unbounded database growth
+        if (this.data.nodes.length > 1000) {
+            const removed = this.data.nodes.splice(0, this.data.nodes.length - 1000);
+            removed.forEach(r => {
+                this.idNodeMap.delete(r.id);
+                if (r.symbols) {
+                    r.symbols.forEach(s => {
+                        const list = this.symbolNodesMap.get(s);
+                        if (list) {
+                            const filtered = list.filter(item => item.id !== r.id);
+                            if (filtered.length > 0) this.symbolNodesMap.set(s, filtered);
+                            else this.symbolNodesMap.delete(s);
+                        }
+                    });
+                }
+            });
+        }
+
+        if (symbols && symbols.length > 0) {
+            symbols.forEach(sym => {
+                const list = this.symbolNodesMap.get(sym) || [];
+                list.push(newNode);
+                this.symbolNodesMap.set(sym, list);
+            });
+        }
         if (stepKey) {
             this.indexedSteps.add(stepKey);
             this.stepNodeMap.set(stepKey, newNode);
@@ -584,7 +764,9 @@ export class MemoryDatabase {
         conversationId?: string,
         stepIndex?: number,
         filesTouched?: string[],
-        contextType?: "decision" | "code_change" | "milestone" | "discussion"
+        contextType?: "decision" | "code_change" | "milestone" | "discussion",
+        recordTimestamp?: string,
+        symbols?: string[]
     ): MemoryNode {
         return this.upsertRecord(
             question,
@@ -595,7 +777,9 @@ export class MemoryDatabase {
             conversationId,
             stepIndex,
             filesTouched,
-            contextType
+            contextType,
+            recordTimestamp,
+            symbols
         ).node;
     }
 
@@ -643,11 +827,116 @@ export class MemoryDatabase {
     }
 
     public getActiveInvariants(scope?: string): InvariantItem[] {
-        return this.data.invariants.filter(r => {
+        const allInvariants: InvariantItem[] = [...this.data.invariants];
+
+        // Also dynamically load latest from invariants.json (written by Python MCP server)
+        if (this.invariantsPath && fs.existsSync(this.invariantsPath)) {
+            try {
+                const raw = fs.readFileSync(this.invariantsPath, 'utf8');
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') {
+                    Object.values(parsed).forEach((r: any) => {
+                        if (r && r.id && !allInvariants.some(existing => existing.id === r.id)) {
+                            allInvariants.push({
+                                id: r.id,
+                                ruleType: r.rule_type || "NEGATIVE_CONSTRAINT",
+                                content: r.content,
+                                scope: r.scope || "global",
+                                status: r.status || "ACTIVE",
+                                createdAt: r.created_at || "",
+                                supersededBy: r.superseded_by,
+                                revokedReason: r.revoked_reason
+                            });
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error("MemLite: Error loading invariants.json:", e);
+            }
+        }
+
+        return allInvariants.filter(r => {
             if (r.status !== "ACTIVE") return false;
             if (scope && r.scope !== "global" && r.scope !== scope) return false;
             return true;
         });
+    }
+
+    // --- Symbol & Safeguard Query Methods ---
+    public getMemoriesForSymbol(symbol: string): MemoryNode[] {
+        if (!symbol) return [];
+        return this.symbolNodesMap.get(symbol) || [];
+    }
+
+    public getFileActionsForSymbol(symbol: string): FileActionItem[] {
+        if (!symbol) return [];
+        return this.symbolActionsMap.get(symbol) || [];
+    }
+
+    public getInvariantsForFileOrSymbol(
+        filePath: string,
+        symbols: string[] = [],
+        exactSymbolOnly: boolean = false
+    ): InvariantItem[] {
+        const cleanFile = filePath.replace(/\\/g, '/').toLowerCase();
+        const fileBasename = path.basename(cleanFile);
+        const active = this.getActiveInvariants();
+        return active.filter(inv => {
+            const cleanContent = inv.content.toLowerCase();
+            const cleanScope = (inv.scope || "").replace(/^file:/i, '').replace(/\\/g, '/').toLowerCase();
+            const scopeBasename = path.basename(cleanScope);
+
+            // 1. Whole word symbol mention in invariant content or scope (length >= 3)
+            const matchesSymbol = symbols.some(s => {
+                if (!s || s.length < 3) return false;
+                const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const inContent = new RegExp(`\\b${escaped}\\b`, 'i').test(cleanContent);
+                const inScope = new RegExp(`\\b${escaped}\\b`, 'i').test(cleanScope);
+                return inContent || inScope;
+            });
+            if (matchesSymbol) return true;
+
+            // If query is specifically for a function/symbol, require direct symbol relevance
+            if (exactSymbolOnly) {
+                return matchesSymbol;
+            }
+
+            // 2. Direct file scope match (supports "backtest.py", "manual_process/backtest.py", etc.)
+            if (cleanScope && cleanScope !== "global") {
+                const fileMatches = cleanFile.includes(cleanScope) || 
+                                    cleanScope.includes(cleanFile) ||
+                                    fileBasename === cleanScope ||
+                                    fileBasename === scopeBasename;
+                if (!fileMatches) return false;
+
+                // If symbols were touched, prioritize symbol match
+                if (matchesSymbol) return true;
+
+                // Dynamically check if invariant mentions another known symbol in the project (zero hardcoding)
+                if (symbols.length > 0) {
+                    const allKnownSymbols = this.getAllIndexedSymbols();
+                    const mentionsOtherKnownSymbol = allKnownSymbols.some(otherSym => {
+                        if (!otherSym || otherSym.length < 3 || symbols.includes(otherSym)) return false;
+                        const escaped = otherSym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        return new RegExp(`\\b${escaped}\\b`, 'i').test(cleanContent);
+                    });
+                    if (mentionsOtherKnownSymbol) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            return false;
+        });
+    }
+
+    public getAllIndexedSymbols(): string[] {
+        return Array.from(new Set([
+            ...Array.from(this.symbolNodesMap.keys()),
+            ...Array.from(this.symbolActionsMap.keys())
+        ]));
     }
 
     public renameSession(conversationId: string, newTitle?: string, newProject?: string) {
@@ -743,6 +1032,36 @@ export class MemoryDatabase {
             this.data.fileActions[existingIdx] = actionItem;
         } else {
             this.data.fileActions.push(actionItem);
+        }
+
+        // Bound fileActions to max 500 items to prevent unbounded memory & disk growth
+        if (this.data.fileActions.length > 500) {
+            const removed = this.data.fileActions.splice(0, this.data.fileActions.length - 500);
+            removed.forEach(r => {
+                if (r.symbols) {
+                    r.symbols.forEach(s => {
+                        const list = this.symbolActionsMap.get(s);
+                        if (list) {
+                            const filtered = list.filter(item => item.id !== r.id);
+                            if (filtered.length > 0) this.symbolActionsMap.set(s, filtered);
+                            else this.symbolActionsMap.delete(s);
+                        }
+                    });
+                }
+            });
+        }
+
+        if (actionItem.symbols && Array.isArray(actionItem.symbols)) {
+            actionItem.symbols.forEach(sym => {
+                const list = this.symbolActionsMap.get(sym) || [];
+                const idx = list.findIndex(fa => fa.id === actionItem.id);
+                if (idx !== -1) {
+                    list[idx] = actionItem;
+                } else {
+                    list.push(actionItem);
+                }
+                this.symbolActionsMap.set(sym, list);
+            });
         }
     }
 

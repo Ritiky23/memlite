@@ -23,11 +23,47 @@ class MemLiteMCPServer:
         self.memory = Memory(user_id=user_id, **kwargs)
         self.user_id = user_id
 
-        # Determine storage directory for invariants and provenance
-        actual_db = getattr(self.memory.storage, "db_path", "memlite.db")
-        base_dir = os.path.dirname(os.path.abspath(actual_db))
-        self.invariants = InvariantsLedger(os.path.join(base_dir, "invariants.json"))
-        self.provenance = ProvenanceTracker(os.path.join(base_dir, "provenance.json"))
+        # Determine storage directory for invariants and provenance in unified ~/.memlite
+        home_dir = os.path.expanduser("~")
+        self.unified_dir = os.path.join(home_dir, ".memlite")
+        os.makedirs(self.unified_dir, exist_ok=True)
+        self.invariants = InvariantsLedger(os.path.join(self.unified_dir, "invariants.json"))
+        self.provenance = ProvenanceTracker(os.path.join(self.unified_dir, "provenance.json"))
+
+    def _sync_invariant_to_extension_db(self, rule: Any, reason: str = ""):
+        """Sync invariant rule changes directly into ~/.memlite/memlite_db.json for the VS Code extension."""
+        db_json_path = os.path.join(self.unified_dir, "memlite_db.json")
+        if not os.path.exists(db_json_path):
+            return
+        try:
+            with open(db_json_path, "r", encoding="utf-8") as f:
+                db_data = json.load(f)
+            if "invariants" not in db_data or not isinstance(db_data["invariants"], list):
+                db_data["invariants"] = []
+
+            existing_idx = next((i for i, inv in enumerate(db_data["invariants"]) if inv.get("id") == rule.id), -1)
+            rule_dict = {
+                "id": rule.id,
+                "ruleType": getattr(rule, "rule_type", "NEGATIVE_CONSTRAINT"),
+                "content": rule.content,
+                "scope": getattr(rule, "scope", "global"),
+                "status": getattr(rule, "status", "ACTIVE"),
+                "createdAt": getattr(rule, "created_at", "")
+            }
+            if hasattr(rule, "superseded_by") and rule.superseded_by:
+                rule_dict["supersededBy"] = rule.superseded_by
+            if reason:
+                rule_dict["revokedReason"] = reason
+
+            if existing_idx != -1:
+                db_data["invariants"][existing_idx] = rule_dict
+            else:
+                db_data["invariants"].append(rule_dict)
+
+            with open(db_json_path, "w", encoding="utf-8") as f:
+                json.dump(db_data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not sync invariant to memlite_db.json: {e}")
 
     def get_tools_manifest(self) -> list:
         return [
@@ -212,7 +248,7 @@ class MemLiteMCPServer:
             },
             {
                 "name": "add_invariant",
-                "description": "Register an unalterable Tier 0 invariant rule or negative constraint (e.g. 'Never use PyTorch').",
+                "description": "Register an unalterable Tier 0 invariant rule, architectural decision, or bug workaround (e.g. 'Broker API silently caps at 50 without x-cursor-mode' or 'Never use PyTorch'). Call this whenever you or the user discover an undocumented bug, workaround, or strict negative constraint.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -446,6 +482,7 @@ class MemLiteMCPServer:
                 scope=arguments.get("scope", "global"),
                 supersedes_id=arguments.get("supersedes_id")
             )
+            self._sync_invariant_to_extension_db(rule)
             return {
                 "content": [
                     {
@@ -461,6 +498,7 @@ class MemLiteMCPServer:
             )
             if not rule:
                 raise ValueError(f"Rule ID '{arguments['rule_id']}' not found.")
+            self._sync_invariant_to_extension_db(rule, reason=arguments.get("reason", ""))
             return {
                 "content": [
                     {
@@ -476,6 +514,7 @@ class MemLiteMCPServer:
                 rule_type=arguments.get("rule_type", "NEGATIVE_CONSTRAINT"),
                 scope=arguments.get("scope", "global")
             )
+            self._sync_invariant_to_extension_db(new_rule)
             return {
                 "content": [
                     {
@@ -526,6 +565,10 @@ class MemLiteMCPServer:
                 method = msg.get("method")
                 params = msg.get("params", {})
 
+                # JSON-RPC 2.0: Server MUST NOT reply to notifications (requests without an 'id')
+                if req_id is None:
+                    continue
+
                 if method == "tools/list":
                     response = {
                         "jsonrpc": "2.0",
@@ -567,6 +610,12 @@ class MemLiteMCPServer:
                                 "version": "0.3.0"
                             }
                         }
+                    }
+                elif method == "ping":
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {}
                     }
                 else:
                     response = {
